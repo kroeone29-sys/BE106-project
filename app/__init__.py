@@ -1,6 +1,7 @@
 import os
 from flask import Flask
 from .config import DevelopmentConfig, TestingConfig, ProductionConfig
+from .main import main_bp
 
 def create_app():
     app = Flask(__name__)
@@ -18,4 +19,7 @@ def create_app():
     print("Selected config:", app.config.get("ENV", env))
 
     # init blueprints, extensions, etc. here later
+
+    app.register_blueprint(main_bp)
+    
     return app
