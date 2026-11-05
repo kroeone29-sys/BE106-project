@@ -2,6 +2,7 @@ import os
 from flask import Flask
 from .config import DevelopmentConfig, TestingConfig, ProductionConfig
 from .main import main_bp
+from .extensions import db, migrate
 
 def create_app():
     app = Flask(__name__)
@@ -19,6 +20,10 @@ def create_app():
     print("Selected config:", app.config.get("ENV", env))
 
     # init blueprints, extensions, etc. here later
+    db.init_app(app)
+    migrate.init_app(app, db)
+
+    from . import models
 
     app.register_blueprint(main_bp)
     
