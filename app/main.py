@@ -2,6 +2,10 @@ from flask import Blueprint, jsonify, request
 
 from app.models import User
 
+from werkzeug.security import generate_password_hash
+from app.extensions import db
+
+
 main_bp = Blueprint("main", __name__)
 
 @main_bp.route("/ping")
@@ -42,8 +46,14 @@ def register():
             }
         }), 409
 
+    hashed = generate_password_hash(password)
+
+    user = User(email=email, password_hash=hashed)
+    db.session.add(user)
+    db.session.commit()
+
     return jsonify({
-        "id": 1,
-        "username": "kevin",
-        "created_at": "2026-11-05T12:34:56Z"
+        "id": user.id,
+        "email": user.email,
+        "created_at": user.created_at.isoformat()
     }), 201
