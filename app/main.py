@@ -4,6 +4,9 @@ from app.models import User
 
 from werkzeug.security import generate_password_hash
 from app.extensions import db
+from datetime import datetime, timedelta, timezone
+import jwt
+from flask import current_app
 
 
 main_bp = Blueprint("main", __name__)
@@ -57,3 +60,57 @@ def register():
         "email": user.email,
         "created_at": user.created_at.isoformat()
     }), 201
+
+@main_bp.route("/login", methods=["POST"])
+def login():
+    data = request.get_json()
+    password = data.get("password")
+    email = data.get("email")
+
+    if not password:
+        return jsonify({
+            "error": {
+                "code": "VALIDATION_ERROR",
+                "message": "Invalid login data",
+                "details": {
+                    "password": ["Password is required"]
+                }
+            }
+        }), 400
+
+    user = User.query.filter_by(email=email).first()
+    if not user:
+        return jsonify({
+            "error": {
+                "code": "INVALID_CREDENTIALS",
+                "message": "Invalid email or password",
+                "details": {}
+            }
+        }), 401
+
+    from werkzeug.security import check_password_hash
+    if not check_password_hash(user.password_hash, password):
+        return jsonify({
+            "error": {
+                "code": "INVALID_CREDENTIALS",
+                "message": "Invalid email or password",
+                "details": {}
+            }
+        }), 401
+
+    now = datetime.now(timezone.utc)
+    lifetime_seconds = current_app.config.get("JWT_LIFETIME_SECONDS")
+
+    payload = {
+        "sub": str(user.id),
+        "role": "user", 
+        "exp": now + timedelta(seconds=lifetime_seconds)
+    }
+
+    token = jwt.encode(
+        payload,
+        current_app.config.get("JWT_SECRET"),
+        algorithm="HS256"
+    )
+
+    return jsonify({"token": token}), 200
