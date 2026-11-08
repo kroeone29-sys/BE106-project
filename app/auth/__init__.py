@@ -1,10 +1,12 @@
 import jwt
 
 from flask import Blueprint, jsonify, request, g, current_app
+from functools import wraps
 
 auth_bp = Blueprint("auth", __name__)
 
 def jwt_required(fn):
+    @wraps(fn)
     def wrapper(*args, **kwargs):
         # placeholder for now - real auth logic coming next
         auth_header = request.headers.get("Authorization", "")

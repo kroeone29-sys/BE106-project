@@ -1,4 +1,4 @@
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, jsonify, request, g
 
 from app.models import User
 
@@ -7,6 +7,7 @@ from app.extensions import db
 from datetime import datetime, timedelta, timezone
 import jwt
 from flask import current_app
+from app.auth import jwt_required
 
 
 main_bp = Blueprint("main", __name__)
@@ -114,3 +115,64 @@ def login():
     )
 
     return jsonify({"token": token}), 200
+
+@main_bp.route("/users/me", methods=["GET"])
+@jwt_required
+def get_my_profile():
+    # user_id was stamped by jwt_required, based on the JWT payload
+    user_id = g.user_id
+
+    user = User.query.get(user_id)
+    if user is None:
+        return jsonify({
+            "error": {
+                "code": "USER_NOT_FOUND",
+                "message": "User not found",
+                "details": {}
+            }
+        }), 404 
+
+    return jsonify({
+        "id": user.id,
+        "email": user.email,
+        # add other SAFE fields if you have them
+        "display_name": user.display_name,
+    }), 200
+
+@main_bp.route("/users/me", methods=["PATCH"])
+@jwt_required
+def update_my_profile():
+    user_id = g.user_id
+
+    user = User.query.get(user_id)
+    if user is None:
+        return jsonify({
+            "error": {
+                "code": "USER_NOT_FOUND",
+                "message": "User not found",
+                "details": {}
+            }
+        }), 404
+
+    data = request.get_json() or {}
+
+    # Only allow updating display_name
+    if "display_name" not in data:
+        return jsonify({
+            "error": {
+                "code": "VALIDATION_ERROR",
+                "message": "Invalid update data",
+                "details": {
+                    "display_name": ["Display name is required"]
+                }
+            }
+        }), 400
+
+    user.display_name = data["display_name"]
+    db.session.commit()
+
+    return jsonify({
+        "id": user.id,
+        "email": user.email,
+        "display_name": user.display_name,
+    }), 200
