@@ -39,3 +39,23 @@ class User(db.Model):
     created_at = db.Column(db.DateTime, nullable=False, default=db.func.now())
     display_name = db.Column(db.String(255), nullable=True)
     role = db.Column(db.String(20), nullable=False, default="user")
+
+class EngineLog(db.Model):
+    """
+    Engine-to-engine traffic audit log. 
+
+    Each row records a single handoff of a payload between two engines, owned by 
+    one application user (typically an admin). The database enforces ownership via
+    a non-null foreign key to user.id , and timestamps each entry at creation time.
+    This model is the schema backbone for future, admin-only observability over
+    engine traffic.
+    """
+
+    __tablename__ = "engine_log"
+
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
+    from_engine = db.Column(db.String(255), nullable=False)
+    to_engine = db.Column(db.String(255), nullable=False)
+    payload_id = db.Column(db.String(255), nullable=False)
+    created_at = db.Column(db.DateTime, nullable=False, default=db.func.now())
