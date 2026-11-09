@@ -1,3 +1,12 @@
+"""
+Application entrypoint and Flask app factory.
+
+This module wires together the core extensions, blueprints, and configuration
+for the backend service. Authentication is handled with JWTs, and role-based
+authorization uses the User.role field in the database to protect admin-only
+endpoints (for example, routes under the /admin prefix).
+"""
+
 from flask import Blueprint, jsonify, request, g
 
 from app.models import User
@@ -11,6 +20,7 @@ from app.auth import jwt_required
 
 
 main_bp = Blueprint("main", __name__)
+admin_bp = Blueprint("admin", __name__, url_prefix="/admin")
 
 @main_bp.route("/ping")
 def ping():
@@ -176,3 +186,32 @@ def update_my_profile():
         "email": user.email,
         "display_name": user.display_name,
     }), 200
+
+@admin_bp.route("/ping", methods=["GET"])
+@jwt_required
+def admin_ping():
+    """
+    Admin-only health check endpoint.
+
+    This route verifies two things in order:
+
+    1. Authentication: @jwt_required ensures the request carries a valid
+       JWT. If the token is missing or invalid, , the jwt_required decorator
+       returns a 401 and this function is never called.
+    2. Authorization: once authenticated, we load the User from the database
+       and check that user.role == "admin". Non-admin users receive 403.
+
+    The role value is read from the trusted User record in the database,
+    never from client-submitted JSON.
+    """
+    # Authentication has already happened via @jwt_required().
+    # At this point we trust that get_jwt_identity() came from a verified token.
+    user_id = getattr(g, "user_id", None)
+    user = User.query.get(user_id)
+
+    # Authorization: only admin users are allowed to access this route.
+    if user is None or user.role != "admin":
+        return jsonify({"error": "forbidden"}), 403
+
+    # Happy path: authenticated admin user.
+    return jsonify({"status": "admin-ok"}), 200

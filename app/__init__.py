@@ -1,7 +1,7 @@
 import os
 from flask import Flask
 from .config import DevelopmentConfig, TestingConfig, ProductionConfig
-from .main import main_bp
+from .main import main_bp, admin_bp
 from .extensions import db, migrate
 from .auth import auth_bp
 
@@ -28,5 +28,5 @@ def create_app():
 
     app.register_blueprint(main_bp)
     app.register_blueprint(auth_bp, url_prefix="/auth")
-    
+    app.register_blueprint(admin_bp)
     return app
