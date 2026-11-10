@@ -40,6 +40,13 @@ class User(db.Model):
     display_name = db.Column(db.String(255), nullable=True)
     role = db.Column(db.String(20), nullable=False, default="user")
 
+    # All engineLog rows owned by this user
+    engine_logs = db.relationship(
+        "EngineLog",
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )
+
 class EngineLog(db.Model):
     """
     Engine-to-engine traffic audit log. 
@@ -59,3 +66,9 @@ class EngineLog(db.Model):
     to_engine = db.Column(db.String(255), nullable=False)
     payload_id = db.Column(db.String(255), nullable=False)
     created_at = db.Column(db.DateTime, nullable=False, default=db.func.now())
+
+    # The User who owns this log entry
+    user = db.relationship(
+        "User",
+        back_populates="engine_logs",
+    )
