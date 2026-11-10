@@ -9,7 +9,7 @@ endpoints (for example, routes under the /admin prefix).
 
 from flask import Blueprint, jsonify, request, g
 
-from app.models import User
+from app.models import User, EngineLog
 
 from werkzeug.security import generate_password_hash
 from app.extensions import db
@@ -215,3 +215,108 @@ def admin_ping():
 
     # Happy path: authenticated admin user.
     return jsonify({"status": "admin-ok"}), 200
+
+@main_bp.route("/engine-logs", methods=["GET"])
+@jwt_required
+def list_engine_logs():
+    """
+    List EngineLog records owned by the authenticated user.
+
+    This endpoint:
+    -Requires a valid JWT (via @jwt_required), wich sets 
+    g.user_id.
+    Queries the database for EngineLog rows where user_id 
+    matches g.user_id.
+    - Returns a 200 OK with a JSON array of engine log objects
+    for that user only, never exposing other users' logs.
+    """
+    user_id = g.user_id
+
+    # Query all EngineLogs for this user
+    logs = EngineLog.query.filter_by(user_id=user_id).all()
+
+    # serialize the logs to JSON
+    log_data = [
+        {
+            "id": log.id,
+            "user_id": log.user_id,
+            "from_engine": log.from_engine,
+            "to_engine": log.to_engine,
+            "payload_id": log.payload_id,
+            "created_at": log.created_at.isoformat()
+        }
+        for log in logs
+    ]
+    return jsonify(log_data), 200
+
+@main_bp.route("/engine-logs", methods=["POST"])
+@jwt_required
+def create_engine_log():
+    """
+    Create a new EngineLog owned by the authenticated user.
+    
+    This endpoint:
+    - Accepts a json body with engine handoff fields:
+      - from_engine
+      - to_engine
+      - payload_id
+    - Validates the request body and returns a 400 VALIDATION_ERROR 
+    if any required fields are missing.
+    - Creates a new EngineLog row with user_id taken from the g.user_id
+    (never from client input) and persistes it with the ORM session.
+    - On sucess, returns the created EngineLog as JSON with a 201 
+    status code."
+    """
+    data = request.get_json()
+
+    if data is None:
+        return jsonify({
+            "error": {
+                "code": "VALIDATION_ERROR",
+                "message": "Invalid engine log data",
+                "details": {
+                    "body": ["JSON body is required"]
+                }
+            }
+        }), 400
+
+    from_engine = data.get("from_engine")
+    to_engine = data.get("to_engine")
+    payload_id = data.get("payload_id")
+
+    if not from_engine or not to_engine or not payload_id:
+        return jsonify({
+            "error": {
+                "code": "VALIDATION_ERROR",
+                "message": "Invalid engine log data",
+                "details": {
+                    "from_engine": ["from_engine is required"],
+                    "to_engine": ["to_engine is required"],
+                    "payload_id": ["payload_id is required"]
+                }
+            }
+        }), 400
+
+    user_id = g.user_id
+
+    # Create a new EngineLog owned by this user
+    log = EngineLog(
+        from_engine=from_engine,
+        to_engine=to_engine,
+        payload_id=payload_id,
+        user_id=user_id,
+        created_at=datetime.now(timezone.utc)
+    )
+    # persist it to the database
+    db.session.add(log)
+    db.session.commit()
+
+    # Return the created log as JSON
+    return jsonify({
+        "id": log.id,
+        "user_id": log.user_id,
+        "from_engine": log.from_engine,
+        "to_engine": log.to_engine,
+        "payload_id": log.payload_id,
+        "created_at": log.created_at.isoformat()
+    }), 201
