@@ -320,3 +320,59 @@ def create_engine_log():
         "payload_id": log.payload_id,
         "created_at": log.created_at.isoformat()
     }), 201
+
+@main_bp.route("/engine-logs/<int:log_id>", methods=["GET"])
+@jwt_required
+def get_engine_log(log_id: int):
+    """
+    Retrieve a single EngineLog by its ID,
+    
+    This endpoint:
+    - Requires a valid JWT (@jwt_required) and uses g.user_id as
+    the caller identity.
+    - Looks up an EngineLog row by the given `log_id`.
+    - Returns 404 with the standard JSON error envelope when no
+    row exists.
+    
+    Ownership notes
+    - This version only distinguishes between "exists" and "does 
+    not exist".
+    - Handling the case where the log exists but belongs to a different user_id
+    (e.g., 403 or non enumerating 404) is implemented in a
+    later lesson.
+    
+    Args:
+        log_id: Integer primary key of the EngineLog to to retrieve.
+        
+    Returns:
+        A flask response object with:
+        - 200 and a JSON representation of the EngineLog on 
+        success.
+        - 404 and the JSON error envelope if no EngineLog is 
+        found for `log_id`.
+        """
+
+    # 1. Try to find the log by primary key
+    log = EngineLog.query.get(log_id)
+
+    # 2. If not found, return 404 with JSON error envelope
+    if log is None:
+        return jsonify({
+            "error": {
+                "code": "NOT_FOUND",
+                "message": "EngineLog not found",
+                "details": {
+                    "log_id": log_id
+                }
+            }
+        }), 404
+
+    # 3. If found, return 200 with the serialized log
+    return jsonify({
+        "id": log.id,
+        "user_id": log.user_id,
+        "from_engine": log.from_engine,
+        "to_engine": log.to_engine,
+        "payload_id": log.payload_id,
+        "created_at": log.created_at.isoformat(),
+    }), 200
