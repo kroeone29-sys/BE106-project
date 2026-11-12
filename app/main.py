@@ -325,32 +325,43 @@ def create_engine_log():
 @jwt_required
 def get_engine_log(log_id: int):
     """
-    Retrieve a single EngineLog by its ID,
-    
+    Retrieve a single EngineLog by its ID, enforcing ownership.
+
     This endpoint:
-    - Requires a valid JWT (@jwt_required) and uses g.user_id as
-    the caller identity.
-    - Looks up an EngineLog row by the given `log_id`.
-    - Returns 404 with the standard JSON error envelope when no
-    row exists.
-    
-    Ownership notes
-    - This version only distinguishes between "exists" and "does 
-    not exist".
-    - Handling the case where the log exists but belongs to a different user_id
-    (e.g., 403 or non enumerating 404) is implemented in a
-    later lesson.
-    
+
+    - Requires a valid JWT (`@jwt_required`) and uses `g.user_id` as
+      the authenticated caller identity.
+    - Looks up an `EngineLog` row by the given `log_id`.
+    - Enforces that only the owner of the log (matching `user_id`) can
+      see it.
+
+    Behavior and ownership:
+
+    - If no `EngineLog` exists with the given `log_id`:
+      - Return `404` with the standard `NOT_FOUND` JSON error envelope.
+
+    - If an `EngineLog` exists but its `user_id` does not match `g.user_id`:
+      - Treat this as an **authorization (ownership) failure**.
+      - Still return `404` with the same `NOT_FOUND` JSON error envelope
+        (non-enumerating: do not reveal that another user's log exists).
+
+    - If an `EngineLog` exists and its `user_id` matches `g.user_id`:
+      - Return `200` with the serialized log JSON
+        (`id`, `user_id`, `from_engine`, `to_engine`,
+         `payload_id`, `created_at`).
+
     Args:
-        log_id: Integer primary key of the EngineLog to to retrieve.
-        
+        log_id: Integer primary key of the `EngineLog` to retrieve.
+
     Returns:
-        A flask response object with:
-        - 200 and a JSON representation of the EngineLog on 
-        success.
-        - 404 and the JSON error envelope if no EngineLog is 
-        found for `log_id`.
-        """
+        A Flask response object with:
+        - 200 and a JSON representation of the `EngineLog` on success
+          when the authenticated user is the owner.
+        - 404 and the standard `NOT_FOUND` JSON error envelope when:
+          - no `EngineLog` is found for `log_id`, or
+          - an `EngineLog` exists but is owned by a different user
+            (authorization failure surfaced as a non-enumerating 404).
+    """
 
     # 1. Try to find the log by primary key
     log = EngineLog.query.get(log_id)
@@ -367,7 +378,19 @@ def get_engine_log(log_id: int):
             }
         }), 404
 
-    # 3. If found, return 200 with the serialized log
+    # 3. If found but not owned by this user, return 404 with same NOT_FOUND envelope
+    if log.user_id != g.user_id:
+        return jsonify({
+            "error": {
+                "code": "NOT_FOUND",
+                "message": "EngineLog not found",
+                "details": {
+                    "log_id": log_id
+                }
+            }
+        }), 404
+    
+    # 4. If found, return 200 with the serialized log
     return jsonify({
         "id": log.id,
         "user_id": log.user_id,
@@ -381,28 +404,41 @@ def get_engine_log(log_id: int):
 @jwt_required
 def delete_engine_log(log_id: int):
     """
-    Permanently delete an existing EngineLog.
+    Permanently delete an existing EngineLog, enforcing ownership.
 
-    This endpoint deletes one EngineLog row identified by
-    `log_id`.
+    This endpoint deletes one EngineLog row identified by `log_id`.
 
-    Ownership is not enorced yet; any authenticated user can
-    delete any existing EngineLog. A later change will restrict
-    deletions to the owner or convert this into an archive flow.
-    
-    Behavior:
-    - On success:
-        - Looks up the EngineLog by `log_id`.
-        - Delets the row from the database.
-        - Commits the deletion.
-        - Retuns 204 No Content with an empty response body.
-    - If no EngineLog exists with the given ID:
-        - Returns 404 NOT_FOUND with the standard error envelope.
+    Behavior and ownership:
+
+    - If no `EngineLog` exists with the given `log_id`:
+      - Return `404` with the standard `NOT_FOUND` JSON error envelope.
+
+    - If an `EngineLog` exists but its `user_id` does not match `g.user_id`:
+      - Treat this as an **authorization (ownership) failure**.
+      - Still return `404` with the same `NOT_FOUND` JSON error envelope
+        (non-enumerating: do not reveal that another user's log exists).
+
+    - If an `EngineLog` exists and its `user_id` matches `g.user_id`:
+      - Delete the row from the database.
+      - Commit the deletion.
+      - Return `204 No Content` with an empty response body.
 
     Authentication:
-    - Requires a valid JWT in the Authoriaztion header.
-    - Uses `@jwt_required` to populate `g.user_id`, but does not 
-    check ownership yet.
+    - Requires a valid JWT in the Authorization header.
+    - Uses `@jwt_required` to populate `g.user_id`; this endpoint then
+      enforces authorization via an ownership check on `EngineLog.user_id`.
+
+    Args:
+        log_id: Integer primary key of the `EngineLog` to delete.
+
+    Returns:
+        A Flask response object with:
+        - 204 No Content on successful deletion when the authenticated
+          user is the owner.
+        - 404 and the standard `NOT_FOUND` JSON error envelope when:
+          - no `EngineLog` is found for `log_id`, or
+          - an `EngineLog` exists but is owned by a different user
+            (authorization failure surfaced as a non-enumerating 404).
     """
 
     # 1. Look up the EngineLog by primary key
@@ -420,71 +456,85 @@ def delete_engine_log(log_id: int):
                 }
             }), 404
 
-    # 3. Delete the row and commit the change
+    # 3. If found but not owned by this user, return 404 with same NOT_FOUND envelope
+    if log.user_id != g.user_id:
+        return jsonify({
+            "error": {
+                "code": "NOT_FOUND",
+                "message": "EngineLog not found",
+                "details": {
+                    "log_id": log_id
+                }
+            }
+        }), 404
+
+    # 4. Delete the row and commit the change
     db.session.delete(log)
     db.session.commit()
 
-    # 4. Return 204 No Content to indicate successful deletion
+    # 5. Return 204 No Content to indicate successful deletion
     return "", 204
 
 @main_bp.patch("/engine-logs/<int:log_id>")
 @jwt_required
 def update_engine_log(log_id: int):
     """
-       Partially update and existing EngineLog.
+    Fully update an existing EngineLog by its ID, enforcing ownership.
 
-    This endpoint updates one EngineLog row indentified 
-    by `log_id`.
-
-    Ownership is not enforced yet; any authenticated user can
-    update any eisting EngineLog. A later change will restrict updates 
-    to the owner and may tighten which fields are allowed. 
+    This endpoint updates one EngineLog row identified by `log_id`.
 
     Request Body:
--    - JSON object with any subset of these fields:
-+    - JSON object that includes all of these fields:
-         - `from_engine` (string)
-         - `to_engine` (string)
-         - `payload_id` (string or identifier type used in the app)
-+    - All three fields are required, using the same validation rules
-+      as the create endpoint.
-     - The `user_id` is never acepted from the client and is not
-       updatable through this endpoint
+    - JSON object that includes all of these fields:
+        - `from_engine` (string)
+        - `to_engine` (string)
+        - `payload_id` (string or identifier type used in the app)
+    - All three fields are required, using the same validation rules
+      as the create endpoint.
+    - The `user_id` is never accepted from the client and is not
+      updatable through this endpoint.
 
-    Behavior:
--    - On suggess:
--        - Looks up the EngineLog by `log_id`.
--        - Validates that a JSON body is present.
--        - Validates fields using the same style as the create
--        endpoint (400 VALIDATION_ERROR with per-field messages).
--        - Applies updates only to allowed fields.
--        - Commits the change to the database.
--        - Returns 200 OK with the updated EngineLog in the same 
--        JSON shape as GET-by-ID and POST: `id`, `user_id`, `from_engine`, 
--        `to_engine`, `payload_id`, `created_at`.
-+    - On success:
-+        - Looks up the EngineLog by `log_id`.
-+        - Validates that a JSON body is present.
-+        - Validates that `from_engine`, `to_engine`, and `payload_id`
-+          are all provided and valid, using the same style as the
-+          create endpoint (400 VALIDATION_ERROR with per-field messages).
-+        - Applies updates only to those allowed fields.
-+        - Commits the change to the database.
-+        - Returns 200 OK with the updated EngineLog in the same 
-+          JSON shape as GET-by-ID and POST: `id`, `user_id`, `from_engine`, 
-+          `to_engine`, `payload_id`, `created_at`.
+    Behavior and ownership:
 
-    - If no EngineLog exists with the given ID:
-        - Returns 404 NOT_FOUND with the standard error envelope.
-    - If the request body is missing or invalid:
-        - Returns 400 VALIDATION_ERROR with the same error shape
-        and style as the create endpoint.
+    - If no `EngineLog` exists with the given `log_id`:
+      - Return `404` with the standard `NOT_FOUND` JSON error envelope.
+
+    - If an `EngineLog` exists but its `user_id` does not match `g.user_id`:
+      - Treat this as an **authorization (ownership) failure**.
+      - Still return `404` with the same `NOT_FOUND` JSON error envelope
+        (non-enumerating: do not reveal that another user's log exists).
+
+    - If an `EngineLog` exists and its `user_id` matches `g.user_id`:
+      - Read and validate the JSON payload.
+      - Require non-empty `from_engine`, `to_engine`, and `payload_id`
+        using the same validation rules as the create endpoint
+        (400 `VALIDATION_ERROR` with per-field messages).
+      - Apply updates only to those allowed fields.
+      - Commit the change to the database.
+      - Return `200 OK` with the updated EngineLog in the same JSON
+        shape as GET-by-ID and POST:
+        `id`, `user_id`, `from_engine`, `to_engine`,
+        `payload_id`, `created_at`.
 
     Authentication:
     - Requires a valid JWT in the Authorization header.
-    - Uses `@jwt_required` to populate `g.user_id`, but does not
-    check ownership yet.
+    - Uses `@jwt_required` to populate `g.user_id`; this endpoint then
+      enforces authorization via an ownership check on `EngineLog.user_id`.
+
+    Args:
+        log_id: Integer primary key of the `EngineLog` to update.
+
+    Returns:
+        A Flask response object with:
+        - 200 and a JSON representation of the updated `EngineLog` on
+          success when the authenticated user is the owner.
+        - 404 and the standard `NOT_FOUND` JSON error envelope when:
+          - no `EngineLog` is found for `log_id`, or
+          - an `EngineLog` exists but is owned by a different user
+            (authorization failure surfaced as a non-enumerating 404).
+        - 400 and the `VALIDATION_ERROR` JSON envelope when the request
+          body is missing or fails field-level validation.
     """
+
     # 1. Try to find the log by primary key
     log = EngineLog.query.get(log_id)
     
@@ -500,7 +550,20 @@ def update_engine_log(log_id: int):
             }
         }), 404
 
-    # 3. Read and validate the JSON body (reuse create endpoint style)
+    
+    # 3. If found but not owned by this user, return 404 with same NOT_FOUND envelope
+    if log.user_id != g.user_id:
+        return jsonify({
+            "error": {
+                "code": "NOT_FOUND",
+                "message": "EngineLog not found",
+                "details": {
+                    "log_id": log_id
+                }
+            }
+        }), 404
+    
+    # 4. Read and validate the JSON body (reuse create endpoint style)
     data = request.get_json()
     
     if data is None:
@@ -514,7 +577,7 @@ def update_engine_log(log_id: int):
             }
         }), 400
 
-    # 4. Extract and validate required fields (same rules as create)
+    # 5. Extract and validate required fields (same rules as create)
     from_engine = data.get("from_engine")
     to_engine = data.get("to_engine")
     payload_id = data.get("payload_id")
@@ -532,14 +595,14 @@ def update_engine_log(log_id: int):
             }
         }), 400
 
-    # 5. Apply updates and persist them
+    # 6. Apply updates and persist them
     log.from_engine = from_engine
     log.to_engine = to_engine
     log.payload_id = payload_id
 
     db.session.commit()
 
-    # 6. Return the updated EngineLog in the standard shape
+    # 7. Return the updated EngineLog in the standard shape
     return jsonify({
         "id": log.id,
         "user_id": log.user_id,
