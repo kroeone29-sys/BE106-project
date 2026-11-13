@@ -1,42 +1,121 @@
+
 """
 Application entrypoint and Flask app factory.
 
-This module wires together the core extensions, blueprints, and configuration
-for the backend service. Authentication is handled with JWTs, and role-based
-authorization uses the User.role field in the database to protect admin-only
-endpoints (for example, routes under the /admin prefix).
+This module defines the application's primary API blueprints and their
+request handlers. It provides user registration and authentication,
+authenticated profile management, administrative access checks, and
+EngineLog resource operations.
+
+Authentication is handled with JWTs. The authenticated user's identity
+is supplied by the jwt_required decorator through g.user_id. Resource
+ownership is enforced by comparing that identity with the corresponding
+database record.
 """
 
 from flask import Blueprint, jsonify, request, g
 
 from app.models import User, EngineLog
+from app.extensions import db
+from app.auth import jwt_required
 
 from werkzeug.security import generate_password_hash
-from app.extensions import db
+
 from datetime import datetime, timedelta, timezone
 import jwt
+
 from flask import current_app
-from app.auth import jwt_required
 
 
 main_bp = Blueprint("main", __name__)
 admin_bp = Blueprint("admin", __name__, url_prefix="/admin")
 
+
 @main_bp.route("/ping")
 def ping():
+    """
+    Provide a basic blueprint availability check.
+
+    Returns:
+        A plain-text response confirming that the main blueprint is reachable.
+    """
     return "OK from blueprint"
+
 
 @main_bp.route("/health")
 def health():
+    """
+    Provide a JSON health-check response.
+
+    Returns:
+        A 200 response containing the application's basic health status.
+    """
     return jsonify({"status": "ok"}), 200
+
+
+def request_object_validation_error():
+    """
+    Build a standard VALIDATION_ERROR response when a request body is not
+    a JSON object.
+
+    Endpoints that require named fields must receive a JSON object.
+    Arrays, strings, numbers, booleans, and null values do not satisfy
+    that request structure.
+
+    Returns:
+        A 400 response using the standard validation error envelope.
+    """
+    return jsonify({
+        "error": {
+            "code": "VALIDATION_ERROR",
+            "message": "Invalid request data",
+            "details": {
+                "body": ["A JSON object is required."]
+            }
+        }
+    }), 400
+
 
 @main_bp.route("/register", methods=["POST"])
 def register():
+    """
+    Register a new user account.
 
+    Request Body:
+        A JSON object containing:
+            - email: The email address for the new account.
+            - password: The password for the new account.
+
+    Processing:
+        1. Read and validate the JSON request body.
+        2. Extract the submitted email and password.
+        3. Require a password.
+        4. Check whether the email is already registered.
+        5. Hash the password before storing it.
+        6. Create and persist the new User record.
+
+    Returns:
+        - 201 when the account is successfully created.
+        - 400 when the JSON structure is invalid or the password is missing.
+        - 409 when the submitted email is already registered.
+
+    Security:
+        Passwords are hashed before persistence and are never stored
+        in plaintext.
+    """
+
+    # 1. Read the JSON request body.
     data = request.get_json()
+
+    # 2. Require an object before accessing named fields.
+    if not isinstance(data, dict):
+        return request_object_validation_error()
+
+    # 3. Extract the submitted registration fields.
     password = data.get("password")
     email = data.get("email")
-    
+
+    # 4. Require a password before creating the account.
     if not password:
         return jsonify({
             "error": {
@@ -48,6 +127,7 @@ def register():
             }
         }), 400
 
+    # 5. Prevent registration with an email already in use.
     existing_user = User.query.filter_by(email=email).first()
     if existing_user:
         return jsonify({
@@ -60,24 +140,65 @@ def register():
             }
         }), 409
 
+    # 6. Hash the password before it is persisted.
     hashed = generate_password_hash(password)
 
+    # 7. Create the user record and commit it to the database.
     user = User(email=email, password_hash=hashed)
     db.session.add(user)
     db.session.commit()
 
+    # 8. Return the newly created account details.
     return jsonify({
         "id": user.id,
         "email": user.email,
         "created_at": user.created_at.isoformat()
     }), 201
 
+
 @main_bp.route("/login", methods=["POST"])
 def login():
+    """
+    Authenticate an existing user and issue a signed JWT.
+
+    Request Body:
+        A JSON object containing:
+            - email: The account email address.
+            - password: The account password.
+
+    Processing:
+        1. Read and validate the JSON request body.
+        2. Extract the submitted credentials.
+        3. Require a password.
+        4. Look up the account by email.
+        5. Verify the submitted password against its stored hash.
+        6. Build and sign a JWT using the configured secret and lifetime.
+
+    Returns:
+        - 200 when authentication succeeds, with the signed JWT.
+        - 400 when the JSON structure is invalid or the password is missing.
+        - 401 when the email or password is incorrect.
+
+    Security:
+        - Passwords are verified against their stored hashes.
+        - Unknown email addresses and incorrect passwords return the same
+          INVALID_CREDENTIALS response to prevent account enumeration.
+        - JWTs are signed with the configured JWT secret and expire according
+          to JWT_LIFETIME_SECONDS.
+    """
+
+    # 1. Read the JSON request body.
     data = request.get_json()
+
+    # 2. Require an object before accessing named fields.
+    if not isinstance(data, dict):
+        return request_object_validation_error()
+
+    # 3. Extract the submitted login credentials.
     password = data.get("password")
     email = data.get("email")
 
+    # 4. Require a password before attempting authentication.
     if not password:
         return jsonify({
             "error": {
@@ -89,6 +210,7 @@ def login():
             }
         }), 400
 
+    # 5. Look up the account using the submitted email address.
     user = User.query.filter_by(email=email).first()
     if not user:
         return jsonify({
@@ -99,6 +221,7 @@ def login():
             }
         }), 401
 
+    # 6. Verify the submitted password against the stored password hash.
     from werkzeug.security import check_password_hash
     if not check_password_hash(user.password_hash, password):
         return jsonify({
@@ -109,51 +232,51 @@ def login():
             }
         }), 401
 
+    # 7. Build the JWT payload with the configured expiration.
     now = datetime.now(timezone.utc)
     lifetime_seconds = current_app.config.get("JWT_LIFETIME_SECONDS")
 
     payload = {
         "sub": str(user.id),
-        "role": "user", 
+        "role": "user",
         "exp": now + timedelta(seconds=lifetime_seconds)
     }
 
+    # 8. Sign the JWT using the configured application secret.
     token = jwt.encode(
         payload,
         current_app.config.get("JWT_SECRET"),
         algorithm="HS256"
     )
 
+    # 9. Return the signed token to the authenticated client.
     return jsonify({"token": token}), 200
+
 
 @main_bp.route("/users/me", methods=["GET"])
 @jwt_required
 def get_my_profile():
-    # user_id was stamped by jwt_required, based on the JWT payload
+    """
+    Retrieve the authenticated user's profile.
+
+    Authentication:
+        Requires a valid JWT. The jwt_required decorator supplies the
+        authenticated user's ID through g.user_id.
+
+    Processing:
+        1. Read the authenticated user's ID.
+        2. Retrieve the corresponding User record.
+        3. Return the user's safe profile fields.
+
+    Returns:
+        - 200 with the user's profile when the record exists.
+        - 404 when no matching User record is found.
+    """
+
+    # 1. Read the identity established by the authentication decorator.
     user_id = g.user_id
 
-    user = User.query.get(user_id)
-    if user is None:
-        return jsonify({
-            "error": {
-                "code": "USER_NOT_FOUND",
-                "message": "User not found",
-                "details": {}
-            }
-        }), 404 
-
-    return jsonify({
-        "id": user.id,
-        "email": user.email,
-        # add other SAFE fields if you have them
-        "display_name": user.display_name,
-    }), 200
-
-@main_bp.route("/users/me", methods=["PATCH"])
-@jwt_required
-def update_my_profile():
-    user_id = g.user_id
-
+    # 2. Retrieve the corresponding user record.
     user = User.query.get(user_id)
     if user is None:
         return jsonify({
@@ -164,9 +287,58 @@ def update_my_profile():
             }
         }), 404
 
+    # 3. Return profile fields that are safe to expose to the user.
+    return jsonify({
+        "id": user.id,
+        "email": user.email,
+        "display_name": user.display_name,
+    }), 200
+
+
+@main_bp.route("/users/me", methods=["PATCH"])
+@jwt_required
+def update_my_profile():
+    """
+    Update the authenticated user's profile.
+
+    Request Body:
+        A JSON object containing:
+            - display_name: The display name to assign to the user.
+
+    Authentication:
+        Requires a valid JWT. The jwt_required decorator supplies the
+        authenticated user's ID through g.user_id.
+
+    Processing:
+        1. Retrieve the authenticated user's database record.
+        2. Read the submitted JSON body.
+        3. Require the display_name field.
+        4. Apply the permitted profile update and commit the change.
+
+    Returns:
+        - 200 with the updated profile when the update succeeds.
+        - 400 when the required display_name field is missing.
+        - 404 when no matching User record is found.
+    """
+
+    # 1. Read the authenticated user's ID.
+    user_id = g.user_id
+
+    # 2. Retrieve the corresponding user record.
+    user = User.query.get(user_id)
+    if user is None:
+        return jsonify({
+            "error": {
+                "code": "USER_NOT_FOUND",
+                "message": "User not found",
+                "details": {}
+            }
+        }), 404
+
+    # 3. Read the submitted JSON body.
     data = request.get_json() or {}
 
-    # Only allow updating display_name
+    # 4. Require the profile field this endpoint permits the user to update.
     if "display_name" not in data:
         return jsonify({
             "error": {
@@ -178,64 +350,128 @@ def update_my_profile():
             }
         }), 400
 
+    # 5. Apply the permitted update and persist the change.
     user.display_name = data["display_name"]
     db.session.commit()
 
+    # 6. Return the updated profile.
     return jsonify({
         "id": user.id,
         "email": user.email,
         "display_name": user.display_name,
     }), 200
 
+
 @admin_bp.route("/ping", methods=["GET"])
 @jwt_required
 def admin_ping():
     """
-    Admin-only health check endpoint.
+    Provide an administrative health check for authenticated administrators.
 
-    This route verifies two things in order:
+    Authentication:
+        The jwt_required decorator verifies the JWT and supplies the
+        authenticated user's ID through g.user_id. Requests without a valid
+        token receive a 401 response before this function is called.
 
-    1. Authentication: @jwt_required ensures the request carries a valid
-       JWT. If the token is missing or invalid, , the jwt_required decorator
-       returns a 401 and this function is never called.
-    2. Authorization: once authenticated, we load the User from the database
-       and check that user.role == "admin". Non-admin users receive 403.
+    Authorization:
+        The user's role is read from the trusted User database record.
+        Only users whose database role is "admin" are permitted.
 
-    The role value is read from the trusted User record in the database,
-    never from client-submitted JSON.
+    Returns:
+        - 200 when the authenticated user has the admin role.
+        - 403 when the user record is missing or the user is not an admin.
+
+    Security:
+        Authorization relies on the database role rather than a role value
+        supplied in the request body.
     """
-    # Authentication has already happened via @jwt_required().
-    # At this point we trust that get_jwt_identity() came from a verified token.
+
+    # 1. Read the authenticated identity established by jwt_required.
     user_id = getattr(g, "user_id", None)
     user = User.query.get(user_id)
 
-    # Authorization: only admin users are allowed to access this route.
+    # 2. Enforce the admin role using the database record.
     if user is None or user.role != "admin":
         return jsonify({"error": "forbidden"}), 403
 
-    # Happy path: authenticated admin user.
+    # 3. Return success for an authenticated administrator.
     return jsonify({"status": "admin-ok"}), 200
+
+
+def engine_log_not_found(log_id: int):
+    """
+    Build the standard NOT_FOUND JSON response for an EngineLog resource.
+
+    Centralizing this response ensures that GET, PATCH, and DELETE
+    operations return the same error envelope when a resource is missing
+    or is not owned by the authenticated user.
+
+    Args:
+        log_id: The primary key of the requested EngineLog.
+
+    Returns:
+        A 404 response with the standard NOT_FOUND error envelope.
+    """
+    return jsonify({
+        "error": {
+            "code": "NOT_FOUND",
+            "message": "EngineLog not found",
+            "details": {
+                "log_id": log_id
+            }
+        }
+    }), 404
+
+
+def engine_log_validation_error(details: dict):
+    """
+    Build the standard VALIDATION_ERROR JSON response for EngineLog payloads.
+
+    This helper keeps request validation responses consistent across
+    EngineLog creation and update operations.
+
+    Args:
+        details: Field-level or request-level validation errors.
+
+    Returns:
+        A 400 response with the standard VALIDATION_ERROR envelope.
+    """
+    return jsonify({
+        "error": {
+            "code": "VALIDATION_ERROR",
+            "message": "Invalid engine log data",
+            "details": details,
+        }
+    }), 400
+
 
 @main_bp.route("/engine-logs", methods=["GET"])
 @jwt_required
 def list_engine_logs():
     """
-    List EngineLog records owned by the authenticated user.
+    List EngineLog records belonging to the authenticated user.
 
-    This endpoint:
-    -Requires a valid JWT (via @jwt_required), wich sets 
-    g.user_id.
-    Queries the database for EngineLog rows where user_id 
-    matches g.user_id.
-    - Returns a 200 OK with a JSON array of engine log objects
-    for that user only, never exposing other users' logs.
+    Authentication:
+        Requires a valid JWT. The jwt_required decorator supplies the
+        authenticated user's ID through g.user_id.
+
+    Processing:
+        1. Read the authenticated user's ID.
+        2. Query EngineLog records belonging to that user.
+        3. Serialize the matching records into a JSON array.
+
+    Returns:
+        A 200 response containing the authenticated user's EngineLog
+        records. Records belonging to other users are excluded.
     """
+
+    # 1. Read the authenticated user's ID.
     user_id = g.user_id
 
-    # Query all EngineLogs for this user
+    # 2. Retrieve only EngineLog records owned by this user.
     logs = EngineLog.query.filter_by(user_id=user_id).all()
 
-    # serialize the logs to JSON
+    # 3. Serialize each record into the API response shape.
     log_data = [
         {
             "id": log.id,
@@ -247,59 +483,77 @@ def list_engine_logs():
         }
         for log in logs
     ]
+
+    # 4. Return the collection as a JSON array.
     return jsonify(log_data), 200
+
 
 @main_bp.route("/engine-logs", methods=["POST"])
 @jwt_required
 def create_engine_log():
     """
     Create a new EngineLog owned by the authenticated user.
-    
-    This endpoint:
-    - Accepts a json body with engine handoff fields:
-      - from_engine
-      - to_engine
-      - payload_id
-    - Validates the request body and returns a 400 VALIDATION_ERROR 
-    if any required fields are missing.
-    - Creates a new EngineLog row with user_id taken from the g.user_id
-    (never from client input) and persistes it with the ORM session.
-    - On sucess, returns the created EngineLog as JSON with a 201 
-    status code."
+
+    Request Body:
+        A JSON object containing all required fields:
+            - from_engine
+            - to_engine
+            - payload_id
+
+    Authentication and ownership:
+        Requires a valid JWT. The authenticated user's ID is supplied
+        through g.user_id and is used as the new record's owner.
+        The client cannot assign ownership through request data.
+
+    Processing:
+        1. Read the JSON request body.
+        2. Reject a missing body.
+        3. Require the top-level JSON value to be an object.
+        4. Extract the required EngineLog fields.
+        5. Validate that all required fields are present and non-empty.
+        6. Create the record using g.user_id as its owner.
+        7. Persist the record.
+        8. Return the created record.
+
+    Returns:
+        - 201 with the created EngineLog when validation succeeds.
+        - 400 with a VALIDATION_ERROR envelope when the body is missing,
+          is not a JSON object, or fails field-level validation.
     """
+
+    # 1. Read the JSON request body.
     data = request.get_json()
 
+    # 2. Reject a missing JSON body.
     if data is None:
-        return jsonify({
-            "error": {
-                "code": "VALIDATION_ERROR",
-                "message": "Invalid engine log data",
-                "details": {
-                    "body": ["JSON body is required"]
-                }
-            }
-        }), 400
+        return engine_log_validation_error({
+            "body": ["JSON body is required"]
+        })
 
+    # 3. Require an object before accessing named fields.
+    if not isinstance(data, dict):
+        return request_object_validation_error()
+
+    # 4. Extract the required EngineLog fields.
     from_engine = data.get("from_engine")
     to_engine = data.get("to_engine")
     payload_id = data.get("payload_id")
 
-    if not from_engine or not to_engine or not payload_id:
-        return jsonify({
-            "error": {
-                "code": "VALIDATION_ERROR",
-                "message": "Invalid engine log data",
-                "details": {
-                    "from_engine": ["from_engine is required"],
-                    "to_engine": ["to_engine is required"],
-                    "payload_id": ["payload_id is required"]
-                }
-            }
-        }), 400
+    # 5. Collect field-level errors for missing or empty values.
+    field_errors = {}
+    if not from_engine:
+        field_errors["from_engine"] = ["from_engine is required"]
+    if not to_engine:
+        field_errors["to_engine"] = ["to_engine is required"]
+    if not payload_id:
+        field_errors["payload_id"] = ["payload_id is required"]
 
+    # 6. Return the validation response if any required fields are invalid.
+    if field_errors:
+        return engine_log_validation_error(field_errors)
+
+    # 7. Create the record using the authenticated user as its owner.
     user_id = g.user_id
-
-    # Create a new EngineLog owned by this user
     log = EngineLog(
         from_engine=from_engine,
         to_engine=to_engine,
@@ -307,11 +561,12 @@ def create_engine_log():
         user_id=user_id,
         created_at=datetime.now(timezone.utc)
     )
-    # persist it to the database
+
+    # 8. Persist the new record.
     db.session.add(log)
     db.session.commit()
 
-    # Return the created log as JSON
+    # 9. Return the created record with its generated database ID.
     return jsonify({
         "id": log.id,
         "user_id": log.user_id,
@@ -321,76 +576,48 @@ def create_engine_log():
         "created_at": log.created_at.isoformat()
     }), 201
 
+
 @main_bp.route("/engine-logs/<int:log_id>", methods=["GET"])
 @jwt_required
 def get_engine_log(log_id: int):
     """
-    Retrieve a single EngineLog by its ID, enforcing ownership.
+    Retrieve one EngineLog by ID, enforcing resource ownership.
 
-    This endpoint:
+    Authentication and ownership:
+        Requires a valid JWT. The authenticated user's ID is supplied
+        through g.user_id. The requested record must belong to that user.
 
-    - Requires a valid JWT (`@jwt_required`) and uses `g.user_id` as
-      the authenticated caller identity.
-    - Looks up an `EngineLog` row by the given `log_id`.
-    - Enforces that only the owner of the log (matching `user_id`) can
-      see it.
-
-    Behavior and ownership:
-
-    - If no `EngineLog` exists with the given `log_id`:
-      - Return `404` with the standard `NOT_FOUND` JSON error envelope.
-
-    - If an `EngineLog` exists but its `user_id` does not match `g.user_id`:
-      - Treat this as an **authorization (ownership) failure**.
-      - Still return `404` with the same `NOT_FOUND` JSON error envelope
-        (non-enumerating: do not reveal that another user's log exists).
-
-    - If an `EngineLog` exists and its `user_id` matches `g.user_id`:
-      - Return `200` with the serialized log JSON
-        (`id`, `user_id`, `from_engine`, `to_engine`,
-         `payload_id`, `created_at`).
+    Processing:
+        1. Look up the EngineLog by its primary key.
+        2. Return the standard 404 response if no record exists.
+        3. Return the same 404 response if another user owns the record.
+        4. Serialize and return the record when ownership is confirmed.
 
     Args:
-        log_id: Integer primary key of the `EngineLog` to retrieve.
+        log_id: The primary key of the EngineLog to retrieve.
 
     Returns:
-        A Flask response object with:
-        - 200 and a JSON representation of the `EngineLog` on success
-          when the authenticated user is the owner.
-        - 404 and the standard `NOT_FOUND` JSON error envelope when:
-          - no `EngineLog` is found for `log_id`, or
-          - an `EngineLog` exists but is owned by a different user
-            (authorization failure surfaced as a non-enumerating 404).
+        - 200 with the EngineLog when the authenticated user owns it.
+        - 404 with the standard NOT_FOUND envelope when the record does
+          not exist or belongs to another user.
+
+    Security:
+        Returning the same 404 response for missing and non-owned records
+        prevents the endpoint from revealing another user's resource.
     """
 
-    # 1. Try to find the log by primary key
+    # 1. Look up the requested record by primary key.
     log = EngineLog.query.get(log_id)
 
-    # 2. If not found, return 404 with JSON error envelope
+    # 2. Return the standard response when the record does not exist.
     if log is None:
-        return jsonify({
-            "error": {
-                "code": "NOT_FOUND",
-                "message": "EngineLog not found",
-                "details": {
-                    "log_id": log_id
-                }
-            }
-        }), 404
+        return engine_log_not_found(log_id)
 
-    # 3. If found but not owned by this user, return 404 with same NOT_FOUND envelope
+    # 3. Enforce ownership without revealing whether another user's record exists.
     if log.user_id != g.user_id:
-        return jsonify({
-            "error": {
-                "code": "NOT_FOUND",
-                "message": "EngineLog not found",
-                "details": {
-                    "log_id": log_id
-                }
-            }
-        }), 404
-    
-    # 4. If found, return 200 with the serialized log
+        return engine_log_not_found(log_id)
+
+    # 4. Return the record after ownership has been confirmed.
     return jsonify({
         "id": log.id,
         "user_id": log.user_id,
@@ -400,209 +627,155 @@ def get_engine_log(log_id: int):
         "created_at": log.created_at.isoformat(),
     }), 200
 
+
 @main_bp.delete("/engine-logs/<int:log_id>")
 @jwt_required
 def delete_engine_log(log_id: int):
     """
-    Permanently delete an existing EngineLog, enforcing ownership.
+    Delete one EngineLog by ID, enforcing resource ownership.
 
-    This endpoint deletes one EngineLog row identified by `log_id`.
+    Authentication and ownership:
+        Requires a valid JWT. The authenticated user's ID is supplied
+        through g.user_id. Only the owner may delete the requested record.
 
-    Behavior and ownership:
-
-    - If no `EngineLog` exists with the given `log_id`:
-      - Return `404` with the standard `NOT_FOUND` JSON error envelope.
-
-    - If an `EngineLog` exists but its `user_id` does not match `g.user_id`:
-      - Treat this as an **authorization (ownership) failure**.
-      - Still return `404` with the same `NOT_FOUND` JSON error envelope
-        (non-enumerating: do not reveal that another user's log exists).
-
-    - If an `EngineLog` exists and its `user_id` matches `g.user_id`:
-      - Delete the row from the database.
-      - Commit the deletion.
-      - Return `204 No Content` with an empty response body.
-
-    Authentication:
-    - Requires a valid JWT in the Authorization header.
-    - Uses `@jwt_required` to populate `g.user_id`; this endpoint then
-      enforces authorization via an ownership check on `EngineLog.user_id`.
+    Processing:
+        1. Look up the EngineLog by its primary key.
+        2. Return the standard 404 response if no record exists.
+        3. Return the same 404 response if another user owns the record.
+        4. Delete and commit the record when ownership is confirmed.
 
     Args:
-        log_id: Integer primary key of the `EngineLog` to delete.
+        log_id: The primary key of the EngineLog to delete.
 
     Returns:
-        A Flask response object with:
-        - 204 No Content on successful deletion when the authenticated
-          user is the owner.
-        - 404 and the standard `NOT_FOUND` JSON error envelope when:
-          - no `EngineLog` is found for `log_id`, or
-          - an `EngineLog` exists but is owned by a different user
-            (authorization failure surfaced as a non-enumerating 404).
+        - 204 with an empty response body when deletion succeeds.
+        - 404 with the standard NOT_FOUND envelope when the record does
+          not exist or belongs to another user.
+
+    Security:
+        Returning the same 404 response for missing and non-owned records
+        prevents the endpoint from revealing another user's resource.
     """
 
-    # 1. Look up the EngineLog by primary key
+    # 1. Look up the requested record by primary key.
     log = EngineLog.query.get(log_id)
 
-    # 2. If not found, return 404 with the standard error envelope
+    # 2. Return the standard response when the record does not exist.
     if log is None:
-            return jsonify({
-                "error": {
-                    "code": "NOT_FOUND",
-                    "message": "EngineLog not found",
-                    "details": {
-                        "log_id": log_id
-                    }
-                }
-            }), 404
+        return engine_log_not_found(log_id)
 
-    # 3. If found but not owned by this user, return 404 with same NOT_FOUND envelope
+    # 3. Enforce ownership without revealing whether another user's record exists.
     if log.user_id != g.user_id:
-        return jsonify({
-            "error": {
-                "code": "NOT_FOUND",
-                "message": "EngineLog not found",
-                "details": {
-                    "log_id": log_id
-                }
-            }
-        }), 404
+        return engine_log_not_found(log_id)
 
-    # 4. Delete the row and commit the change
+    # 4. Delete the owned record and commit the database change.
     db.session.delete(log)
     db.session.commit()
 
-    # 5. Return 204 No Content to indicate successful deletion
+    # 5. Return 204 No Content to confirm successful deletion.
     return "", 204
+
+
 
 @main_bp.patch("/engine-logs/<int:log_id>")
 @jwt_required
 def update_engine_log(log_id: int):
     """
-    Fully update an existing EngineLog by its ID, enforcing ownership.
-
-    This endpoint updates one EngineLog row identified by `log_id`.
+    Fully update an existing EngineLog by ID, enforcing resource ownership.
 
     Request Body:
-    - JSON object that includes all of these fields:
-        - `from_engine` (string)
-        - `to_engine` (string)
-        - `payload_id` (string or identifier type used in the app)
-    - All three fields are required, using the same validation rules
-      as the create endpoint.
-    - The `user_id` is never accepted from the client and is not
-      updatable through this endpoint.
+        A JSON object containing all required fields:
+            - from_engine
+            - to_engine
+            - payload_id
 
-    Behavior and ownership:
+        All three fields are required and follow the same non-empty
+        validation rules as the create endpoint. The user_id field is
+        not accepted from the client and cannot be changed here.
 
-    - If no `EngineLog` exists with the given `log_id`:
-      - Return `404` with the standard `NOT_FOUND` JSON error envelope.
+    Authentication and ownership:
+        Requires a valid JWT. The authenticated user's ID is supplied
+        through g.user_id. Only the owner may update the requested record.
 
-    - If an `EngineLog` exists but its `user_id` does not match `g.user_id`:
-      - Treat this as an **authorization (ownership) failure**.
-      - Still return `404` with the same `NOT_FOUND` JSON error envelope
-        (non-enumerating: do not reveal that another user's log exists).
-
-    - If an `EngineLog` exists and its `user_id` matches `g.user_id`:
-      - Read and validate the JSON payload.
-      - Require non-empty `from_engine`, `to_engine`, and `payload_id`
-        using the same validation rules as the create endpoint
-        (400 `VALIDATION_ERROR` with per-field messages).
-      - Apply updates only to those allowed fields.
-      - Commit the change to the database.
-      - Return `200 OK` with the updated EngineLog in the same JSON
-        shape as GET-by-ID and POST:
-        `id`, `user_id`, `from_engine`, `to_engine`,
-        `payload_id`, `created_at`.
-
-    Authentication:
-    - Requires a valid JWT in the Authorization header.
-    - Uses `@jwt_required` to populate `g.user_id`; this endpoint then
-      enforces authorization via an ownership check on `EngineLog.user_id`.
+    Processing:
+        1. Look up the EngineLog by its primary key.
+        2. Return the standard 404 response if no record exists.
+        3. Return the same 404 response if another user owns the record.
+        4. Read and validate the JSON request body.
+        5. Require a JSON object before accessing named fields.
+        6. Validate all required fields.
+        7. Apply the permitted field updates and commit the change.
+        8. Return the updated record.
 
     Args:
-        log_id: Integer primary key of the `EngineLog` to update.
+        log_id: The primary key of the EngineLog to update.
 
     Returns:
-        A Flask response object with:
-        - 200 and a JSON representation of the updated `EngineLog` on
-          success when the authenticated user is the owner.
-        - 404 and the standard `NOT_FOUND` JSON error envelope when:
-          - no `EngineLog` is found for `log_id`, or
-          - an `EngineLog` exists but is owned by a different user
-            (authorization failure surfaced as a non-enumerating 404).
-        - 400 and the `VALIDATION_ERROR` JSON envelope when the request
-          body is missing or fails field-level validation.
+        - 200 with the updated EngineLog when validation succeeds.
+        - 400 with a VALIDATION_ERROR envelope when the body is missing,
+          is not a JSON object, or fails field-level validation.
+        - 404 with the standard NOT_FOUND envelope when the record does
+          not exist or belongs to another user.
+
+    Security:
+        The ownership check occurs before request-body processing.
+        Missing and non-owned records receive the same 404 response,
+        preventing disclosure of another user's resource.
     """
 
-    # 1. Try to find the log by primary key
+    # 1. Look up the requested record by primary key.
     log = EngineLog.query.get(log_id)
-    
-    # 2. If not found, return 404 with JSON error envelope
+
+    # 2. Return the standard response when the record does not exist.
     if log is None:
-        return jsonify({
-            "error": {
-                "code": "NOT_FOUND",
-                "message": "EngineLog not found",
-                "details": {
-                    "log_id": log_id
-                }
-            }
-        }), 404
+        return engine_log_not_found(log_id)
 
-    
-    # 3. If found but not owned by this user, return 404 with same NOT_FOUND envelope
+    # 3. Enforce ownership before processing the submitted request body.
     if log.user_id != g.user_id:
-        return jsonify({
-            "error": {
-                "code": "NOT_FOUND",
-                "message": "EngineLog not found",
-                "details": {
-                    "log_id": log_id
-                }
-            }
-        }), 404
-    
-    # 4. Read and validate the JSON body (reuse create endpoint style)
-    data = request.get_json()
-    
-    if data is None:
-        return jsonify({
-            "error": {
-                "code": "VALIDATION_ERROR",
-                "message": "Invalid engine log data",
-                "details": {
-                    "body": ["JSON body is required"]
-                }
-            }
-        }), 400
+        return engine_log_not_found(log_id)
 
-    # 5. Extract and validate required fields (same rules as create)
+    # 4. Read the JSON request body.
+    data = request.get_json()
+
+    # 5. Reject a missing JSON body.
+    if data is None:
+        return engine_log_validation_error({
+            "body": ["JSON body is required"]
+        })
+
+    # 6. Require a JSON object before accessing named fields.
+    #    Valid JSON arrays and scalar values cannot be used as
+    #    request objects and must not reach the field extraction below.
+    if not isinstance(data, dict):
+        return request_object_validation_error()
+
+    # 7. Extract the required EngineLog fields.
     from_engine = data.get("from_engine")
     to_engine = data.get("to_engine")
     payload_id = data.get("payload_id")
 
-    if not from_engine or not to_engine or not payload_id:
-        return jsonify({
-            "error": {
-                "code": "VALIDATION_ERROR",
-                "message": "Invalid engine log data",
-                "details": {
-                    "from_engine": ["from_engine is required"],
-                    "to_engine": ["to_engine is required"],
-                    "payload_id": ["payload_id is required"]
-                }
-            }
-        }), 400
+    # 8. Collect field-level errors for missing or empty values.
+    field_errors = {}
+    if not from_engine:
+        field_errors["from_engine"] = ["from_engine is required"]
+    if not to_engine:
+        field_errors["to_engine"] = ["to_engine is required"]
+    if not payload_id:
+        field_errors["payload_id"] = ["payload_id is required"]
 
-    # 6. Apply updates and persist them
+    # 9. Return the validation response if any required fields are invalid.
+    if field_errors:
+        return engine_log_validation_error(field_errors)
+
+    # 10. Apply the permitted updates to the existing owned record.
     log.from_engine = from_engine
     log.to_engine = to_engine
     log.payload_id = payload_id
 
+    # 11. Persist the changes.
     db.session.commit()
 
-    # 7. Return the updated EngineLog in the standard shape
+    # 12. Return the updated record in the standard response shape.
     return jsonify({
         "id": log.id,
         "user_id": log.user_id,
@@ -612,4 +785,3 @@ def update_engine_log(log_id: int):
         "created_at": log.created_at.isoformat()
     }), 200
 
-   

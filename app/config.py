@@ -7,7 +7,7 @@ class Config:
     SQLALCHEMY_DATABASE_URI = os.environ.get("DATABASE_URL")
     SQLALCHEMY_TRACK_MODIFICATIONS = False
     JWT_SECRET = os.environ.get("JWT_SECRET", "change-me-in-prod")
-    JWT_LIFETIME_SECONDS = int(os.environ.get("JWT_LIFETIME_SECONDS", "300"))
+    JWT_LIFETIME_SECONDS = int(os.environ.get("JWT_LIFETIME_SECONDS", "2400"))
 
 
 class DevelopmentConfig(Config):
