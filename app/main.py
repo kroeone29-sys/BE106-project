@@ -23,6 +23,7 @@ from werkzeug.security import generate_password_hash
 
 from datetime import datetime, timedelta, timezone
 import jwt
+import math
 
 from flask import current_app
 
@@ -449,7 +450,7 @@ def engine_log_validation_error(details: dict):
 @jwt_required
 def list_engine_logs():
     """
-    List EngineLog records belonging to the authenticated user.
+    List paginated EngineLog records belonging to the authenticated user.
 
     Authentication:
         Requires a valid JWT. The jwt_required decorator supplies the
@@ -457,21 +458,72 @@ def list_engine_logs():
 
     Processing:
         1. Read the authenticated user's ID.
-        2. Query EngineLog records belonging to that user.
-        3. Serialize the matching records into a JSON array.
+        2. Read optional page and per_page query parameters, applying
+           default values and validation rules.
+        3. Build a query for EngineLog records belonging to that user.
+        4. Apply a deterministic ordering to the query.
+        5. Apply pagination to return only the requested page of results.
+        6. Serialize the current page of records and attach pagination
+           metadata describing the full result set.
 
     Returns:
-        A 200 response containing the authenticated user's EngineLog
-        records. Records belonging to other users are excluded.
+        A 200 response containing a JSON object with:
+            - items: the current page of EngineLog records owned by the
+              authenticated user.
+            - page: the current page number.
+            - per_page: the maximum number of items per page.
+            - total: the total number of matching EngineLog records for
+              the authenticated user.
+            - pages: the total number of available pages at the current
+              per_page value.
+
+        If the caller supplies invalid pagination parameters, returns a
+        400 response using the standard EngineLog validation error
+        envelope.
     """
 
     # 1. Read the authenticated user's ID.
     user_id = g.user_id
 
-    # 2. Retrieve only EngineLog records owned by this user.
-    logs = EngineLog.query.filter_by(user_id=user_id).all()
+    # 2. Read pagination parameters with defaults.
+    page = request.args.get("page", 1, type=int)
+    per_page = request.args.get("per_page", 20, type=int)
 
-    # 3. Serialize each record into the API response shape.
+    # 3. Validate pagination parameters.
+    if page is None or page < 1:
+        return engine_log_validation_error({
+            "page": ["page must be a positive integer (>= 1)."]
+        })
+
+    if per_page is None or per_page < 1 or per_page > 50:
+        return engine_log_validation_error({
+            "per_page": ["per_page must be a positive integer between 1 and 50."]
+        })
+
+    # 4. Build the base query for this user's EngineLog records.
+    base_query = EngineLog.query.filter_by(user_id=user_id)
+
+    # 5. Compute pagination metadata from the base query.
+    total = base_query.count()
+
+    if total == 0:
+        pages = 0
+    else:
+        # you'll need `import math` at the top of app/main.py
+        pages = math.ceil(total / per_page)
+
+    # 6. Select the current page of logs from the ordered query.
+    offset = (page - 1) * per_page
+
+    logs = (
+        base_query
+        .order_by(EngineLog.id)
+        .offset(offset)
+        .limit(per_page)
+        .all()
+    )
+
+    # 7. Serialize each record into the API response shape.
     log_data = [
         {
             "id": log.id,
@@ -484,8 +536,14 @@ def list_engine_logs():
         for log in logs
     ]
 
-    # 4. Return the collection as a JSON array.
-    return jsonify(log_data), 200
+    # 8. Return the paginated collection with metadata.
+    return jsonify({
+        "items": log_data,
+        "page": page,
+        "per_page": per_page,
+        "total": total,
+        "pages": pages,
+    }), 200
 
 
 @main_bp.route("/engine-logs", methods=["POST"])
@@ -784,4 +842,5 @@ def update_engine_log(log_id: int):
         "payload_id": log.payload_id,
         "created_at": log.created_at.isoformat()
     }), 200
+
 
