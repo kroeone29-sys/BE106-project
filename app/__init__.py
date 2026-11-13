@@ -16,9 +16,10 @@ from flask import Flask, jsonify
 from werkzeug.exceptions import BadRequest, UnsupportedMediaType
 
 from .config import DevelopmentConfig, TestingConfig, ProductionConfig
-from .main import main_bp, admin_bp
 from .extensions import db, migrate
+from .main import main_bp, admin_bp
 from .auth import auth_bp
+from .engine_logs.routes import engine_logs_bp
 
 
 def create_app():
@@ -58,6 +59,7 @@ def create_app():
     app.register_blueprint(main_bp)
     app.register_blueprint(auth_bp, url_prefix="/auth")
     app.register_blueprint(admin_bp)
+    app.register_blueprint(engine_logs_bp)
 
     @app.errorhandler(BadRequest)
     def handle_bad_request(error):
@@ -106,3 +108,4 @@ def create_app():
         }), 415
 
     return app
+
