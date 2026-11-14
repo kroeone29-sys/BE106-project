@@ -1,0 +1,45 @@
+# Summary:
+#   Local Docker Compose stack for the EngineLog app with a Postgres database.
+#   Used for running the app in a production-like environment on a single machine.
+#
+# Services:
+#   web - Flask/Gunicorn container built from this repo's Dockerfile.
+#   db  - PostgreSQL 16 container with a named volume for persistent data.
+#
+# Behavior:
+#   - `docker compose up` starts both services on a shared Docker network.
+#   - The web service connects to the db service using DATABASE_URL with host `db`.
+#   - The db service stores its data in a Docker named volume so data survives restarts.
+#
+# Verification receipts:
+#   1. `docker compose up` shows healthy web and db logs.
+#   2. `/health` endpoint returns HTTP 200 from the web container.
+#   3. Auth + EngineLog create/read work against Postgres.
+#   4. An EngineLog created before `docker compose down` still exists after `docker compose up`.
+
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: enginelog
+      POSTGRES_USER: enginelog
+      POSTGRES_PASSWORD: change-me
+    volumes:
+      - enginelog_db_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+  web:
+    image: enginelog-app:local
+    environment:
+      FLASK_ENV: production
+      JWT_SECRET: dev-secret-change-me
+      DATABASE_URL: postgresql+psycopg://enginelog:change-me@db:5432/enginelog
+      PORT: 8000
+    ports:
+      - "8000:8000"
+    depends_on:
+      - db
+volumes:
+  enginelog_db_data:
+
+

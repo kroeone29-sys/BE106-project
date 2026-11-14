@@ -51,3 +51,120 @@ For now:
 
 - Development uses a local SQLite database by default (`sqlite:///dev.db`) when `DATABASE_URL` is not set.
 - If you change models or schema, you may need to recreate your local database manually during development.
+
+
+## Running with Docker Compose (Flask + PostgreSQL)
+
+This project supports running the Flask application and PostgreSQL database together using Docker Compose.
+
+### Prerequisites
+
+- Docker installed and running
+- Docker Compose available through the Docker CLI
+
+### 1. Build the Web Image
+
+From the project root directory (where the `Dockerfile` is located):
+
+```bash
+docker build -t enginelog-app:local .
+```
+
+### 2. Start the Application Stack
+
+Start both the Flask application and PostgreSQL database:
+
+```bash
+docker compose up
+```
+
+Docker Compose starts two services:
+
+- **db:** PostgreSQL 16 database with persistent storage through a named Docker volume.
+- **web:** Flask application served by Gunicorn, using the same `create_app()` application factory as local development.
+
+The application is exposed on port `8000`.
+
+Leave this terminal running to monitor application and database logs.
+
+### 3. Apply Database Migrations
+
+Open a separate terminal from the project root and execute:
+
+```bash
+docker exec -it be106-project-web-1 flask db upgrade
+```
+
+This applies all pending Flask-Migrate migrations to the PostgreSQL database.
+
+### 4. Verify Application Health
+
+From the host machine, send a request to the health endpoint:
+
+```bash
+curl -i http://localhost:8000/health
+```
+
+Expected response:
+
+**HTTP Status:**
+
+```http
+HTTP/1.1 200 OK
+```
+
+**Response Body:**
+
+```json
+{
+  "status": "ok"
+}
+```
+
+A successful response confirms that the application is responding to health checks.
+
+### 5. Stop the Application Stack
+
+Stop the running services using `Ctrl+C` in the terminal running Docker Compose.
+
+Then execute:
+
+```bash
+docker compose down
+```
+
+This stops and removes the application and database containers while preserving the PostgreSQL data stored in the named Docker volume.
+
+To remove the database volume and its persistent data as well:
+
+```bash
+docker compose down -v
+```
+
+**Warning:** Removing the volume permanently deletes the PostgreSQL data stored in it.
+
+### Architecture Overview
+
+```text
+Host Machine
+    |
+    | localhost:8000
+    |
+Docker Compose
+    |
+    +-- web
+    |     |
+    |     +-- Gunicorn
+    |     +-- Flask Application
+    |     +-- create_app()
+    |     +-- Flask-Migrate
+    |
+    +-- db
+          |
+          +-- PostgreSQL 16
+          +-- Persistent Named Volume
+```
+
+The application and database run as separate services within the same Docker Compose network. The Flask application communicates with PostgreSQL through the configured database connection.
+
+The Docker deployment uses the existing Flask application factory, keeping application initialization consistent between local development and containerized execution.
