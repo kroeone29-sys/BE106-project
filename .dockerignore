@@ -1,0 +1,30 @@
+# .dockerignore
+#
+# Defines which local files are excluded from the Docker build context.
+# This keeps the image smaller, protects secrets, and prevents dev-only
+# artifacts (virtual environments, local databases, VCS metadata)
+# from being baked into the production container image.
+#
+# Only include files that are required at runtime for the Flask service.
+
+# Local virtual environment
+.venv/
+
+# Git metadata
+.git
+
+# Python cache / compiled files
+__pycache__/
+*.pyc
+*.pyo
+
+# Local environment & secrets
+.env
+*.env
+
+# Local SQLite dev database and instance data
+dev.db
+instance/
+
+# OS/editor junk
+.DS_Store
