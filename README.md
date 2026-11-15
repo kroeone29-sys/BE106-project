@@ -525,7 +525,7 @@ The `.env` file is excluded from the Docker build context.
 - Python 3.11
 - pip
 - Git
-- A supported database, or SQLite for local development
+- SQLite for local development, or a supported external database
 
 ### 1. Clone the Repository
 
@@ -534,7 +534,7 @@ git clone <repository-url>
 cd BE106-project
 ```
 
-### 2. Create a Virtual Environment
+### 2. Create and Activate a Virtual Environment
 
 ```bash
 python3 -m venv .venv
@@ -544,26 +544,32 @@ source .venv/bin/activate
 ### 3. Install Dependencies
 
 ```bash
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
 ```
 
 ### 4. Configure Environment Variables
 
-Create a `.env` file in the project root.
+Create a `.env` file in the project root:
 
-At minimum, configure a development JWT secret:
-
-```dotenv
+```env
 APP_ENV=development
 JWT_SECRET=replace-with-a-secure-development-secret
 ```
 
 A local SQLite database is used when `DATABASE_URL` is not supplied.
 
-### 5. Start the Development Server
+### 5. Initialize the Database
+
+Apply the database migrations before starting the application:
 
 ```bash
-flask --app wsgi run --debug --port 5011
+python -m flask --app wsgi db upgrade
+```
+
+### 6. Start the Development Server
+
+```bash
+python -m flask --app wsgi run --debug --port 5011
 ```
 
 The API will be available at:
@@ -572,23 +578,34 @@ The API will be available at:
 http://127.0.0.1:5011
 ```
 
+---
+
 ## Docker Deployment
 
-The Dockerfile builds a Python 3.11-based production container and starts the application with Gunicorn.
+The Dockerfile builds a Python 3.11-based production image and starts the application with Gunicorn.
 
 ### 1. Build the Image
+
+From the project root:
 
 ```bash
 docker build -t enginelog-api .
 ```
 
-### 2. Run the Container
+### 2. Prepare the Production Database
 
-Supply the required production environment variables at runtime:
+The production database must already have the application's migration schema applied before the container starts.
+
+**Important:** The current Dockerfile does not copy the `migrations/` directory into the image. Database migrations therefore cannot be run from the built container as currently configured.
+
+### 3. Run the Container
+
+Supply the production environment variables at runtime:
 
 ```bash
 docker run -d \
   --name enginelog-api \
+  --restart unless-stopped \
   -p 8000:8000 \
   -e APP_ENV=production \
   -e DATABASE_URL="your-database-connection-string" \
@@ -596,7 +613,7 @@ docker run -d \
   enginelog-api
 ```
 
-The application listens on port `8000` inside the container.
+The application listens on port `8000` inside the container and is exposed on port `8000` of the host.
 
 ### Production Server
 
@@ -606,19 +623,23 @@ The Docker image starts Gunicorn using:
 gunicorn --bind 0.0.0.0:8000 wsgi:app
 ```
 
-The Dockerfile does not copy `.env` files into the image. Environment-specific configuration must be supplied at runtime.
+The Dockerfile does not copy `.env` files into the image. Production configuration must be supplied through runtime environment variables.
 
-The `.dockerignore` file excludes local virtual environments, Git metadata, Python cache files, environment files, local SQLite database files, instance data, and macOS metadata from the build context.
+The `.dockerignore` file excludes local virtual environments, Git metadata, Python cache files, environment files, local SQLite database files, instance data, and macOS metadata from the Docker build context.
+
+---
 
 ## Dependencies
 
 All Python dependencies are pinned in `requirements.txt`.
 
-Install the exact listed package versions with:
+Install the listed package versions with:
 
 ```bash
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
 ```
+
+---
 
 ## Current Implementation Notes
 
@@ -633,6 +654,7 @@ The following distinctions describe the current implementation:
 - Profile updates require the `display_name` key but do not enforce a non-empty string.
 - The Dockerfile copies the application package and WSGI entrypoint, but does not copy migration files or a `.env` file.
 - Production database and JWT configuration must be supplied externally.
+- The production database schema must be migrated before the application is started.
 
 ---
 
