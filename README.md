@@ -1,106 +1,640 @@
+
 # EngineLog API
 
-A Flask REST API for recording and retrieving user-owned, engine-to-engine handoff receipts. The application uses JWT-based authentication, user-scoped resource access, and a shared Neon PostgreSQL database across local development, local Docker, and Render production.
+A Flask REST API for user authentication, profile management, role-based administrative access, and user-owned engine-to-engine traffic logs.
 
-> **Documentation status:** This README is a review draft assembled from the supplied BE106 application-context artifacts. Confirm the repository-specific details called out in **Items to Verify Before Merging** against the current source code and Render configuration.
+The application uses JWT authentication, SQLAlchemy for database persistence, and a Docker-based production deployment with Gunicorn.
 
-## Table of Contents
+## Features
 
-- [Project Overview](#project-overview)
-- [Architecture](#architecture)
-- [Data Model](#data-model)
-- [Authentication and Authorization](#authentication-and-authorization)
-- [API Reference](#api-reference)
-- [Prerequisites](#prerequisites)
-- [1. Clone and Configure the Repository](#1-clone-and-configure-the-repository)
-- [2. Run the Flask Development Server](#2-run-the-flask-development-server)
-- [3. Build and Run the Docker Container](#3-build-and-run-the-docker-container)
-- [4. Verify the Render Production Deployment](#4-verify-the-render-production-deployment)
-- [5. Compare All Three Environments](#5-compare-all-three-environments)
-- [Environment Variables and Secrets](#environment-variables-and-secrets)
-- [Docker Configuration](#docker-configuration)
-- [Error Handling and Validation](#error-handling-and-validation)
-- [Operational and Security Notes](#operational-and-security-notes)
-- [Items to Verify Before Merging](#items-to-verify-before-merging)
+- User registration with hashed password storage.
+- User login with signed JSON Web Tokens (JWT).
+- JWT-protected profile endpoints.
+- Database-backed role authorization for administrative access.
+- EngineLog creation, retrieval, updating, and deletion.
+- User-scoped EngineLog resource ownership.
+- Paginated EngineLog listing.
+- Structured JSON validation and error responses.
+- Environment-based configuration for development, testing, and production.
+- PostgreSQL support and SQLite development fallback.
+- Docker deployment using Gunicorn.
 
-## Project Overview
+## Technology Stack
 
-EngineLog records an auditable receipt for a handoff between two engines. Each record identifies:
-
-- The engine that initiated the handoff (`from_engine`).
-- The engine that received the handoff (`to_engine`).
-- The associated payload identifier (`payload_id`).
-- The user who owns the record (`user_id`).
-- The record creation timestamp (`created_at`).
-
-The API enforces ownership at the server boundary. A client cannot assign a record to another user by submitting a `user_id` in its request body.
-
-## Architecture
-
-The application is created through a single Flask application factory:
-
-- `create_app()` in `app/__init__.py` is the application entry point.
-- `wsgi.py` exposes the application as `wsgi:app` for the WSGI server.
-- Feature-specific blueprints organize the routes.
-
-The supplied application context identifies these blueprints:
-
-| Blueprint | URL prefix / responsibility |
+| Component | Technology |
 |---|---|
-| `main_bp` | Core routes, including `/ping` and `/health`, plus any remaining main routes |
-| `auth_bp` | Authentication feature, mounted at `/auth` |
-| `admin_bp` | Administrative endpoints, mounted at `/admin` |
-| `engine_logs_bp` | EngineLog endpoints, mounted at `/engine-logs` |
+| Language | Python 3.11 |
+| Web framework | Flask 3.1.3 |
+| ORM | Flask-SQLAlchemy 3.1.1 |
+| Database toolkit | SQLAlchemy 2.1.6 |
+| Database migrations | Flask-Migrate 4.1.0 / Alembic 1.20.1 |
+| Authentication | PyJWT 2.15.1 |
+| Password hashing | Werkzeug |
+| PostgreSQL driver | psycopg 3.2.13 |
+| Environment configuration | python-dotenv 1.2.4 |
+| Production server | Gunicorn 27.0.1 |
+| Containerization | Docker |
 
-EngineLog route ownership is isolated in `app/engine_logs/routes.py`. The EngineLog blueprint is defined with the `engine_logs` name and `/engine-logs` URL prefix. EngineLog route logic and helpers belong in this feature module rather than `main.py`.
+## Project Structure
 
-### Application Request Flow
+```text
+BE106-project/
+├── app/
+│   ├── __init__.py
+│   ├── config.py
+│   ├── extensions.py
+│   ├── models.py
+│   ├── main.py
+│   ├── auth/
+│   │   └── __init__.py
+│   └── engine_logs/
+│       └── routes.py
+├── wsgi.py
+├── requirements.txt
+├── Dockerfile
+└── .dockerignore
+```
 
-1. A request reaches the Flask application created by `create_app()`.
-2. Flask dispatches the request to the matching blueprint and route.
-3. Protected routes validate the bearer token with `@jwt_required`.
-4. The decorator places the authenticated user ID in `g.user_id`.
-5. EngineLog queries and mutations are scoped to that authenticated user.
-6. The route returns the documented JSON response or an appropriate HTTP error.
+## Application Architecture
 
-## Data Model
+### Application Factory
 
-### User
+The Flask application is created through `create_app()` in `app/__init__.py`.
 
-The User resource represents an account. The supplied context identifies email, a hashed password, an optional display name, and a role.
+The factory:
 
-Passwords must be stored as password hashes, never as plaintext.
+1. Selects the application configuration using `APP_ENV`.
+2. Initializes SQLAlchemy and Flask-Migrate.
+3. Imports the application models.
+4. Registers the application blueprints.
+5. Installs application-wide HTTP error handlers.
 
-### EngineLog
+The application uses separate blueprints for the main API, authentication, administration, and EngineLog resources.
 
-| Field | Purpose |
-|---|---|
-| `id` | Record identifier |
-| `from_engine` | Source engine |
-| `to_engine` | Destination engine |
-| `payload_id` | Identifier for the handed-off payload |
-| `user_id` | Owning user; non-null foreign key to `user.id` |
-| `created_at` | Record creation timestamp |
+### Authentication
 
-Every EngineLog belongs to exactly one user. The database relationship is enforced by `EngineLog.user_id`, which is `NOT NULL` and references `user.id`.
-
-## Authentication and Authorization
-
-### JWT Authentication
-
-Protected endpoints use the custom `@jwt_required` decorator.
+Authentication is implemented through the `jwt_required` decorator in `app/auth/__init__.py`.
 
 The decorator:
 
 1. Reads the `Authorization` request header.
-2. Expects the `Bearer <token>` format.
-3. Verifies and decodes the JWT using `JWT_SECRET`.
-4. Reads the user identifier from the token's `sub` claim.
-5. Sets `g.user_id` to the authenticated user's integer ID.
+2. Requires the `Bearer` authentication scheme.
+3. Extracts and decodes the JWT.
+4. Validates the signature using the configured `JWT_SECRET`.
+5. Rejects expired or invalid tokens.
+6. Establishes the authenticated user's identity through `g.user_id`.
 
-The supplied context identifies `sub`, `role`, and `exp` as token claims, with an approximately 2,400-second token lifetime.
+JWTs use the HS256 signing algorithm.
 
-Example request header:
+The login endpoint issues tokens containing:
+- `sub`: The authenticated user's ID.
+- `role`: The literal value `"user"`.
+- `exp`: The token expiration timestamp.
+
+The token lifetime is controlled by `JWT_LIFETIME_SECONDS`.
+
+### Authorization
+
+Authentication and authorization are handled as separate concerns.
+
+- **Authentication:** A valid JWT establishes the identity of the requester.
+- **Resource authorization:** EngineLog endpoints compare the authenticated user ID against the resource's `user_id`.
+- **Role authorization:** The administrative endpoint retrieves the User record and checks its database-backed `role` value.
+
+The administrative check does not rely on the role claim in the JWT.
+
+EngineLog endpoints enforce ownership rather than requiring an administrator role.
+
+## Database Models
+
+The application defines two SQLAlchemy models: `User` and `EngineLog`.
+
+### User
+
+Table: `user`
+
+| Field | Type | Constraints / Default |
+|---|---|---|
+| `id` | Integer | Primary key |
+| `email` | String(255) | Required, unique |
+| `password_hash` | String(255) | Required |
+| `created_at` | DateTime | Required, database function default |
+| `display_name` | String(255) | Nullable |
+| `role` | String(20) | Required, defaults to `user` |
+
+Passwords are hashed before persistence. Plaintext passwords are not stored.
+
+The `role` field supports database-backed authorization. The model defaults new accounts to the `user` role.
+
+### EngineLog
+
+Table: `engine_log`
+
+| Field | Type | Constraints / Default |
+|---|---|---|
+| `id` | Integer | Primary key |
+| `user_id` | Integer | Required foreign key to `user.id` |
+| `from_engine` | String(255) | Required |
+| `to_engine` | String(255) | Required |
+| `payload_id` | String(255) | Required |
+| `created_at` | DateTime | Required, database function default |
+
+Each EngineLog record belongs to a User through the `user_id` foreign key.
+
+The models define a bidirectional SQLAlchemy relationship using `back_populates`. The User relationship also configures `cascade="all, delete-orphan"` for associated EngineLog records.
+
+## API Reference
+
+The API exposes public endpoints, authenticated user endpoints, administrative endpoints, and EngineLog resource endpoints.
+
+### Health and Availability
+
+| Method | Endpoint | Authentication | Description |
+|---|---|---|---|
+| GET | `/ping` | Public | Basic main-blueprint availability check |
+| GET | `/health` | Public | JSON health check |
+
+`GET /health` returns:
+
+```json
+{
+  "status": "ok"
+}
+```
+
+### Authentication
+
+| Method | Endpoint | Authentication | Description |
+|---|---|---|---|
+| POST | `/register` | Public | Register a new account |
+| POST | `/login` | Public | Authenticate and receive a JWT |
+| GET | `/auth/verify` | JWT | Verify the supplied JWT |
+
+#### POST `/register`
+
+Request:
+
+```json
+{
+  "email": "user@example.com",
+  "password": "your-password"
+}
+```
+
+Successful response: `201 Created`
+
+```json
+{
+  "id": 1,
+  "email": "user@example.com",
+  "created_at": "2026-01-01T12:00:00"
+}
+```
+
+The password is hashed before the User record is persisted.
+
+Possible responses:
+
+- `201`: Account created.
+- `400`: Invalid JSON structure or missing password.
+- `409`: Email already registered.
+
+#### POST `/login`
+
+Request:
+
+```json
+{
+  "email": "user@example.com",
+  "password": "your-password"
+}
+```
+
+Successful response: `200 OK`
+
+```json
+{
+  "token": "<jwt>"
+}
+```
+
+Possible responses:
+
+- `200`: Authentication successful.
+- `400`: Invalid JSON structure or missing password.
+- `401`: Invalid email or password.
+
+Unknown email addresses and incorrect passwords return the same `INVALID_CREDENTIALS` response.
+
+#### GET `/auth/verify`
+
+Requires:
 
 ```http
-Authorization: Bearer <JWT_TOKEN>
+Authorization: Bearer <jwt>
+```
+
+Successful response: `200 OK`
+
+```json
+{
+  "ok": true
+}
+```
+
+### User Profile
+
+| Method | Endpoint | Authentication | Description |
+|---|---|---|---|
+| GET | `/users/me` | JWT | Retrieve the authenticated user's profile |
+| PATCH | `/users/me` | JWT | Update the authenticated user's display name |
+
+#### GET `/users/me`
+
+Successful response: `200 OK`
+
+```json
+{
+  "id": 1,
+  "email": "user@example.com",
+  "display_name": null
+}
+```
+
+#### PATCH `/users/me`
+
+Request:
+
+```json
+{
+  "display_name": "Example User"
+}
+```
+
+The request must include the `display_name` field.
+
+Successful response: `200 OK`
+
+```json
+{
+  "id": 1,
+  "email": "user@example.com",
+  "display_name": "Example User"
+}
+```
+
+Possible responses:
+
+- `200`: Profile updated.
+- `400`: Missing required `display_name` field.
+- `401`: Missing, expired, or invalid JWT.
+- `404`: Authenticated user's database record not found.
+
+### Administration
+
+| Method | Endpoint | Authentication | Description |
+|---|---|---|---|
+| GET | `/admin/ping` | JWT + admin role | Administrative availability check |
+
+The endpoint retrieves the authenticated user's database record and checks whether `role == "admin"`.
+
+Successful response: `200 OK`
+
+```json
+{
+  "status": "admin-ok"
+}
+```
+
+A missing User record or insufficient role returns:
+
+```json
+{
+  "error": "forbidden"
+}
+```
+
+HTTP status: `403 Forbidden`
+
+### EngineLog Resources
+
+All EngineLog endpoints require a valid JWT.
+
+| Method | Endpoint | Description |
+|---|---|---|
+| POST | `/engine-logs` | Create an EngineLog record |
+| GET | `/engine-logs` | Retrieve the authenticated user's logs |
+| GET | `/engine-logs/<log_id>` | Retrieve one owned log |
+| PATCH | `/engine-logs/<log_id>` | Update one owned log |
+| DELETE | `/engine-logs/<log_id>` | Delete one owned log |
+
+#### POST `/engine-logs`
+
+Request:
+
+```json
+{
+  "from_engine": "engine-a",
+  "to_engine": "engine-b",
+  "payload_id": "payload-123"
+}
+```
+
+The authenticated user's ID is assigned to `user_id` by the server. The client does not supply the record owner.
+
+The creation timestamp is generated by the application.
+
+Successful response: `201 Created`
+
+```json
+{
+  "id": 1,
+  "user_id": 1,
+  "from_engine": "engine-a",
+  "to_engine": "engine-b",
+  "payload_id": "payload-123",
+  "created_at": "2026-01-01T12:00:00+00:00"
+}
+```
+
+#### GET `/engine-logs`
+
+Supports pagination through query parameters.
+
+| Parameter | Default | Validation |
+|---|---|---|
+| `page` | 1 | Must be at least 1 |
+| `per_page` | 20 | Must be between 1 and 50 |
+
+Example:
+
+```http
+GET /engine-logs?page=1&per_page=20
+```
+
+The endpoint returns only records belonging to the authenticated user.
+
+Response structure:
+
+```json
+{
+  "items": [],
+  "page": 1,
+  "per_page": 20,
+  "total": 0,
+  "pages": 0
+}
+```
+
+Records are ordered by their database ID.
+
+An out-of-range page returns an empty `items` array while retaining the pagination metadata.
+
+#### GET `/engine-logs/<log_id>`
+
+Retrieves an individual EngineLog record if it exists and belongs to the authenticated user.
+
+#### PATCH `/engine-logs/<log_id>`
+
+Request:
+
+```json
+{
+  "from_engine": "engine-a",
+  "to_engine": "engine-c",
+  "payload_id": "payload-123"
+}
+```
+
+All three fields are required. Although the HTTP method is PATCH, the current implementation requires the complete set of EngineLog fields rather than supporting individual-field updates.
+
+#### DELETE `/engine-logs/<log_id>`
+
+Deletes an owned EngineLog record.
+
+Successful response: `204 No Content`
+
+#### EngineLog Ownership Behavior
+
+For individual GET, PATCH, and DELETE operations, a record that does not exist and a record owned by another user produce the same `404 NOT_FOUND` response.
+
+This prevents the endpoint from revealing whether another user's record exists.
+
+## Error Handling
+
+The application uses structured JSON responses for validation and resource errors.
+
+### Authentication Errors
+
+The JWT decorator returns these responses:
+
+| Condition | HTTP Status | Error |
+|---|---:|---|
+| Missing or malformed Bearer header | 401 | `missing_or_malformed_token` |
+| Expired JWT | 401 | `token_expired` |
+| Invalid JWT | 401 | `invalid_token` |
+
+### Validation Errors
+
+A request body that is not a JSON object returns:
+
+```json
+{
+  "error": {
+    "code": "VALIDATION_ERROR",
+    "message": "Invalid request data",
+    "details": {
+      "body": [
+        "A JSON object is required."
+      ]
+    }
+  }
+}
+```
+
+EngineLog validation errors use the same general envelope with an EngineLog-specific message and details.
+
+### Application-Wide Request Errors
+
+The application factory defines global handlers for:
+
+- `400 Bad Request`: Invalid request JSON.
+- `415 Unsupported Media Type`: Unsupported request media type.
+
+These handlers return structured JSON error responses.
+
+### Resource Errors
+
+EngineLog resources use a consistent `NOT_FOUND` response for missing or unowned records.
+
+User profile endpoints use `USER_NOT_FOUND` when the authenticated user's database record cannot be found.
+
+## Configuration
+
+Configuration is managed in `app/config.py`.
+
+The application selects its configuration using the `APP_ENV` environment variable.
+
+| Environment Variable | Purpose | Default |
+|---|---|---|
+| `APP_ENV` | Selects application configuration | `development` |
+| `DATABASE_URL` | SQLAlchemy database connection URI | None |
+| `JWT_SECRET` | JWT signing secret | Development fallback |
+| `JWT_LIFETIME_SECONDS` | JWT lifetime in seconds | `2400` |
+
+### Configuration Classes
+
+| Class | Behavior |
+|---|---|
+| `DevelopmentConfig` | Enables debug mode and falls back to local SQLite |
+| `TestingConfig` | Enables testing mode and disables debug mode |
+| `ProductionConfig` | Disables debug and testing modes |
+
+Development uses `DATABASE_URL` when supplied. Otherwise, it falls back to an absolute-path SQLite database named `dev.db`.
+
+Testing and production inherit the base database URI configuration. Neither defines a separate database fallback in the current implementation.
+
+### Environment File
+
+The WSGI entrypoint loads environment variables through `python-dotenv` before creating the application.
+
+Create a local `.env` file:
+
+```dotenv
+APP_ENV=development
+JWT_SECRET=replace-with-a-secure-secret
+JWT_LIFETIME_SECONDS=2400
+```
+
+For a PostgreSQL deployment, provide the appropriate `DATABASE_URL`:
+
+```dotenv
+DATABASE_URL=postgresql+psycopg://username:password@host:5432/database
+```
+
+Use the connection URI supplied by your database provider, with credentials and connection parameters appropriate to that environment.
+
+The `.env` file is excluded from the Docker build context.
+
+**Security:** Replace the fallback JWT secret with a strong, unique secret in production. Do not commit `.env` files or production credentials to source control.
+
+## Local Development
+
+### Requirements
+
+- Python 3.11
+- pip
+- Git
+- A supported database, or SQLite for local development
+
+### 1. Clone the Repository
+
+```bash
+git clone <repository-url>
+cd BE106-project
+```
+
+### 2. Create a Virtual Environment
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+```
+
+### 3. Install Dependencies
+
+```bash
+pip install -r requirements.txt
+```
+
+### 4. Configure Environment Variables
+
+Create a `.env` file in the project root.
+
+At minimum, configure a development JWT secret:
+
+```dotenv
+APP_ENV=development
+JWT_SECRET=replace-with-a-secure-development-secret
+```
+
+A local SQLite database is used when `DATABASE_URL` is not supplied.
+
+### 5. Start the Development Server
+
+```bash
+flask --app wsgi run --debug --port 5011
+```
+
+The API will be available at:
+
+```text
+http://127.0.0.1:5011
+```
+
+## Docker Deployment
+
+The Dockerfile builds a Python 3.11-based production container and starts the application with Gunicorn.
+
+### 1. Build the Image
+
+```bash
+docker build -t enginelog-api .
+```
+
+### 2. Run the Container
+
+Supply the required production environment variables at runtime:
+
+```bash
+docker run -d \
+  --name enginelog-api \
+  -p 8000:8000 \
+  -e APP_ENV=production \
+  -e DATABASE_URL="your-database-connection-string" \
+  -e JWT_SECRET="your-secure-production-secret" \
+  enginelog-api
+```
+
+The application listens on port `8000` inside the container.
+
+### Production Server
+
+The Docker image starts Gunicorn using:
+
+```bash
+gunicorn --bind 0.0.0.0:8000 wsgi:app
+```
+
+The Dockerfile does not copy `.env` files into the image. Environment-specific configuration must be supplied at runtime.
+
+The `.dockerignore` file excludes local virtual environments, Git metadata, Python cache files, environment files, local SQLite database files, instance data, and macOS metadata from the build context.
+
+## Dependencies
+
+All Python dependencies are pinned in `requirements.txt`.
+
+Install the exact listed package versions with:
+
+```bash
+pip install -r requirements.txt
+```
+
+## Current Implementation Notes
+
+The following distinctions describe the current implementation:
+
+- User registration hashes passwords before storing them.
+- JWT authentication establishes user identity through `g.user_id`.
+- Admin authorization checks the database-backed User role.
+- EngineLog resource access is scoped to the authenticated user.
+- EngineLog PATCH requires all three resource fields.
+- Registration explicitly requires a password but does not implement email-format validation.
+- Profile updates require the `display_name` key but do not enforce a non-empty string.
+- The Dockerfile copies the application package and WSGI entrypoint, but does not copy migration files or a `.env` file.
+- Production database and JWT configuration must be supplied externally.
+
+---
+
+**EngineLog API**  
+Flask REST API | JWT Authentication | SQLAlchemy | PostgreSQL | Docker
