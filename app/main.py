@@ -178,7 +178,6 @@ def login():
         - 200 when authentication succeeds, with the signed JWT.
         - 400 when the JSON structure is invalid or the password is missing.
         - 401 when the email or password is incorrect.
-
     Security:
         - Passwords are verified against their stored hashes.
         - Unknown email addresses and incorrect passwords return the same

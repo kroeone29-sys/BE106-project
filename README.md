@@ -1,170 +1,106 @@
-# BE106 Backend Project
+# EngineLog API
 
-A Flask-based backend API project for BE106, structured for production-style development and deployment readiness.
+A Flask REST API for recording and retrieving user-owned, engine-to-engine handoff receipts. The application uses JWT-based authentication, user-scoped resource access, and a shared Neon PostgreSQL database across local development, local Docker, and Render production.
 
-## Setup
+> **Documentation status:** This README is a review draft assembled from the supplied BE106 application-context artifacts. Confirm the repository-specific details called out in **Items to Verify Before Merging** against the current source code and Render configuration.
 
-1. Clone the repository:
-    ```bash
-    git clone https://github.com/kroeone29-sys/BE106-project
-    cd BE106-project
-    ```
+## Table of Contents
 
-2. Create and activate a virtual environment (Python 3.11+ recommended):
-    ```bash
-    python -m venv .venv
-    source .venv/bin/activate # macOS/Linux 
-    # On Windows: .venv\Scripts\activate
-    ```
+- [Project Overview](#project-overview)
+- [Architecture](#architecture)
+- [Data Model](#data-model)
+- [Authentication and Authorization](#authentication-and-authorization)
+- [API Reference](#api-reference)
+- [Prerequisites](#prerequisites)
+- [1. Clone and Configure the Repository](#1-clone-and-configure-the-repository)
+- [2. Run the Flask Development Server](#2-run-the-flask-development-server)
+- [3. Build and Run the Docker Container](#3-build-and-run-the-docker-container)
+- [4. Verify the Render Production Deployment](#4-verify-the-render-production-deployment)
+- [5. Compare All Three Environments](#5-compare-all-three-environments)
+- [Environment Variables and Secrets](#environment-variables-and-secrets)
+- [Docker Configuration](#docker-configuration)
+- [Error Handling and Validation](#error-handling-and-validation)
+- [Operational and Security Notes](#operational-and-security-notes)
+- [Items to Verify Before Merging](#items-to-verify-before-merging)
 
-3. Upgrade `pip` (recommended):
-    ```bash
-    pip install --upgrade pip
-    ```
+## Project Overview
 
-4. Install dependencies:
-    ```bash
-    pip install -r requirements.txt
+EngineLog records an auditable receipt for a handoff between two engines. Each record identifies:
 
-## Environment Variables
+- The engine that initiated the handoff (`from_engine`).
+- The engine that received the handoff (`to_engine`).
+- The associated payload identifier (`payload_id`).
+- The user who owns the record (`user_id`).
+- The record creation timestamp (`created_at`).
 
-This project uses a `.env` file for local configuration. An example template is provided in `.env.example`.
+The API enforces ownership at the server boundary. A client cannot assign a record to another user by submitting a `user_id` in its request body.
 
-1. Copy the example file:
-   ```bash
-   cp .env.example .env
-   ```
+## Architecture
 
-2. Edit `.env` and set values appropriate for your environment:
+The application is created through a single Flask application factory:
 
-   - `JWT_SECRET` – secret string used for signing JWTs and other security-related features.
-   - `DATABASE_URL` – (optional in development) database connection string. If not set, development will default to `sqlite:///dev.db`.
+- `create_app()` in `app/__init__.py` is the application entry point.
+- `wsgi.py` exposes the application as `wsgi:app` for the WSGI server.
+- Feature-specific blueprints organize the routes.
 
-> Note: Never commit your real `.env` file. It is listed in `.gitignore` and should remain local only.
+The supplied application context identifies these blueprints:
 
+| Blueprint | URL prefix / responsibility |
+|---|---|
+| `main_bp` | Core routes, including `/ping` and `/health`, plus any remaining main routes |
+| `auth_bp` | Authentication feature, mounted at `/auth` |
+| `admin_bp` | Administrative endpoints, mounted at `/admin` |
+| `engine_logs_bp` | EngineLog endpoints, mounted at `/engine-logs` |
 
-## Database Migrations
+EngineLog route ownership is isolated in `app/engine_logs/routes.py`. The EngineLog blueprint is defined with the `engine_logs` name and `/engine-logs` URL prefix. EngineLog route logic and helpers belong in this feature module rather than `main.py`.
 
-This project does not yet use an automated migration tool (such as Flask-Migrate or Alembic).
+### Application Request Flow
 
-For now:
+1. A request reaches the Flask application created by `create_app()`.
+2. Flask dispatches the request to the matching blueprint and route.
+3. Protected routes validate the bearer token with `@jwt_required`.
+4. The decorator places the authenticated user ID in `g.user_id`.
+5. EngineLog queries and mutations are scoped to that authenticated user.
+6. The route returns the documented JSON response or an appropriate HTTP error.
 
-- Development uses a local SQLite database by default (`sqlite:///dev.db`) when `DATABASE_URL` is not set.
-- If you change models or schema, you may need to recreate your local database manually during development.
+## Data Model
 
+### User
 
-## Running with Docker Compose (Flask + PostgreSQL)
+The User resource represents an account. The supplied context identifies email, a hashed password, an optional display name, and a role.
 
-This project supports running the Flask application and PostgreSQL database together using Docker Compose.
+Passwords must be stored as password hashes, never as plaintext.
 
-### Prerequisites
+### EngineLog
 
-- Docker installed and running
-- Docker Compose available through the Docker CLI
+| Field | Purpose |
+|---|---|
+| `id` | Record identifier |
+| `from_engine` | Source engine |
+| `to_engine` | Destination engine |
+| `payload_id` | Identifier for the handed-off payload |
+| `user_id` | Owning user; non-null foreign key to `user.id` |
+| `created_at` | Record creation timestamp |
 
-### 1. Build the Web Image
+Every EngineLog belongs to exactly one user. The database relationship is enforced by `EngineLog.user_id`, which is `NOT NULL` and references `user.id`.
 
-From the project root directory (where the `Dockerfile` is located):
+## Authentication and Authorization
 
-```bash
-docker build -t enginelog-app:local .
-```
+### JWT Authentication
 
-### 2. Start the Application Stack
+Protected endpoints use the custom `@jwt_required` decorator.
 
-Start both the Flask application and PostgreSQL database:
+The decorator:
 
-```bash
-docker compose up
-```
+1. Reads the `Authorization` request header.
+2. Expects the `Bearer <token>` format.
+3. Verifies and decodes the JWT using `JWT_SECRET`.
+4. Reads the user identifier from the token's `sub` claim.
+5. Sets `g.user_id` to the authenticated user's integer ID.
 
-Docker Compose starts two services:
+The supplied context identifies `sub`, `role`, and `exp` as token claims, with an approximately 2,400-second token lifetime.
 
-- **db:** PostgreSQL 16 database with persistent storage through a named Docker volume.
-- **web:** Flask application served by Gunicorn, using the same `create_app()` application factory as local development.
-
-The application is exposed on port `8000`.
-
-Leave this terminal running to monitor application and database logs.
-
-### 3. Apply Database Migrations
-
-Open a separate terminal from the project root and execute:
-
-```bash
-docker exec -it be106-project-web-1 flask db upgrade
-```
-
-This applies all pending Flask-Migrate migrations to the PostgreSQL database.
-
-### 4. Verify Application Health
-
-From the host machine, send a request to the health endpoint:
-
-```bash
-curl -i http://localhost:8000/health
-```
-
-Expected response:
-
-**HTTP Status:**
+Example request header:
 
 ```http
-HTTP/1.1 200 OK
-```
-
-**Response Body:**
-
-```json
-{
-  "status": "ok"
-}
-```
-
-A successful response confirms that the application is responding to health checks.
-
-### 5. Stop the Application Stack
-
-Stop the running services using `Ctrl+C` in the terminal running Docker Compose.
-
-Then execute:
-
-```bash
-docker compose down
-```
-
-This stops and removes the application and database containers while preserving the PostgreSQL data stored in the named Docker volume.
-
-To remove the database volume and its persistent data as well:
-
-```bash
-docker compose down -v
-```
-
-**Warning:** Removing the volume permanently deletes the PostgreSQL data stored in it.
-
-### Architecture Overview
-
-```text
-Host Machine
-    |
-    | localhost:8000
-    |
-Docker Compose
-    |
-    +-- web
-    |     |
-    |     +-- Gunicorn
-    |     +-- Flask Application
-    |     +-- create_app()
-    |     +-- Flask-Migrate
-    |
-    +-- db
-          |
-          +-- PostgreSQL 16
-          +-- Persistent Named Volume
-```
-
-The application and database run as separate services within the same Docker Compose network. The Flask application communicates with PostgreSQL through the configured database connection.
-
-The Docker deployment uses the existing Flask application factory, keeping application initialization consistent between local development and containerized execution.
+Authorization: Bearer <JWT_TOKEN>
